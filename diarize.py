@@ -26,11 +26,17 @@ engine to an embedder id, and the role library filters by that id.
 from __future__ import annotations
 
 import os
+import threading
 
 import audio_features as af
 import apppaths
 import external_engines
 import media
+
+# Guards the module-level caches below (signal / pipeline / embedder). The HTTP
+# server is threaded and the engine warm-up thread probes concurrently, so an
+# unguarded cache could run a model load twice or hand out a half-built entry.
+_CACHE_LOCK = threading.RLock()
 
 MIN_TURN_SECONDS = 0.30
 
@@ -71,10 +77,13 @@ def engine_availability(refresh: bool = False) -> dict[str, dict]:
     """Probe which engines can run here. Cached: the first probe imports torch
     and can take several seconds, and callers hit this on every page load."""
     global _AVAILABILITY_CACHE
-    if _AVAILABILITY_CACHE is not None and not refresh:
+    with _CACHE_LOCK:
+        if _AVAILABILITY_CACHE is not None and not refresh:
+            return _AVAILABILITY_CACHE
+        # Probing imports torch (seconds); hold the lock so the warm-up thread
+        # and a request thread cannot both run it.
+        _AVAILABILITY_CACHE = _probe_engines()
         return _AVAILABILITY_CACHE
-    _AVAILABILITY_CACHE = _probe_engines()
-    return _AVAILABILITY_CACHE
 
 
 def warm_engines() -> None:
@@ -155,8 +164,59 @@ def _probe_engines() -> dict[str, dict]:
 
 # --- shared helpers ---------------------------------------------------------
 
-def _load_signal(wav_path: str) -> tuple[list[float], int]:
-    return af.read_wav(wav_path, media.AUDIO_SAMPLE_RATE)
+_SIGNAL_CACHE: dict[str, tuple[float, object, int]] = {}
+_SIGNAL_CACHE_MAX = 2
+
+
+def _load_signal(wav_path: str):
+    """Decode a WAV once per (path, mtime); reused across a detection run so
+    pyannote, the voiceprint extractor and the CAM++ slicer never re-decode it.
+
+    Bounded to a couple of entries: each is ~230 MB/hour, so an unbounded cache
+    would leak memory as the user switches projects.
+    """
+    try:
+        mtime = os.path.getmtime(wav_path)
+    except OSError:
+        mtime = 0.0
+    with _CACHE_LOCK:
+        hit = _SIGNAL_CACHE.get(wav_path)
+        if hit is not None and hit[0] == mtime:
+            return hit[1], hit[2]
+    signal, rate = af.read_wav(wav_path, media.AUDIO_SAMPLE_RATE)
+    with _CACHE_LOCK:
+        _SIGNAL_CACHE[wav_path] = (mtime, signal, rate)
+        while len(_SIGNAL_CACHE) > _SIGNAL_CACHE_MAX:
+            _SIGNAL_CACHE.pop(next(iter(_SIGNAL_CACHE)))
+    return signal, rate
+
+
+def _write_wav_slice(signal, rate: int, start: float, end: float, path: str) -> None:
+    """Write ``signal[start:end]`` as a mono 16-bit PCM WAV using stdlib only.
+
+    Replaces a per-turn ``ffmpeg`` subprocess: CAM++ embeds one span at a time,
+    and process spawn + full-file decode per subtitle cue dominated its wall
+    clock. Slicing the already-decoded signal in memory is effectively free.
+    """
+    import array
+    import wave
+
+    begin = max(0, int(start * rate))
+    finish = min(len(signal), int(end * rate))
+    frames = array.array("h")
+    append = frames.append
+    for value in signal[begin:finish]:
+        sample = value * 32767.0
+        if sample > 32767.0:
+            sample = 32767.0
+        elif sample < -32768.0:
+            sample = -32768.0
+        append(int(sample))
+    with wave.open(path, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(frames.tobytes())
 
 
 def _cluster_turns(turns: list[dict], min_speakers: int, max_speakers: int,
@@ -425,8 +485,9 @@ def _pyannote_load_pipeline():
 
     Returns ``(pipeline, repo_name)``.
     """
-    if _PYANNOTE_CACHE.get("pipeline") is not None:
-        return _PYANNOTE_CACHE["pipeline"], _PYANNOTE_CACHE["name"]
+    with _CACHE_LOCK:
+        if _PYANNOTE_CACHE.get("pipeline") is not None:
+            return _PYANNOTE_CACHE["pipeline"], _PYANNOTE_CACHE["name"]
 
     from pyannote.audio import Pipeline
 
@@ -450,7 +511,8 @@ def _pyannote_load_pipeline():
                 pipeline.to(torch.device("cuda"))
         except Exception:
             pass
-        _PYANNOTE_CACHE.update(pipeline=pipeline, name=name)
+        with _CACHE_LOCK:
+            _PYANNOTE_CACHE.update(pipeline=pipeline, name=name)
         return pipeline, name
     raise RuntimeError(" | ".join(errors) or "pyannote pipeline 加载失败")
 
@@ -492,7 +554,8 @@ def run_pyannote(wav_path: str, min_speakers: int, max_speakers: int) -> dict:
     except Exception as exc:
         raise RuntimeError(_pyannote_failure_message(str(exc))) from exc
 
-    audio, waveform, rate = _pyannote_audio_input(wav_path)
+    signal, rate = _load_signal(wav_path)
+    audio, waveform, rate = _pyannote_audio_input(wav_path, signal)
     try:
         output = pipeline(
             audio,
@@ -513,7 +576,7 @@ def run_pyannote(wav_path: str, min_speakers: int, max_speakers: int) -> dict:
     if used_exclusive:
         notes.append("已采用 exclusive 分段（同一时刻只保留最可能的一个说话人），"
                      "更适合逐条字幕归属。")
-    embedder = make_embedder("pyannote", wav_path)
+    embedder = make_embedder("pyannote", wav_path, signal)
     if embedder is None:
         notes.append("声纹提取模型不可用，聚类不做声纹先验匹配（可直接人工归属）。")
     for turn in turns:
@@ -632,7 +695,8 @@ def run_campp(wav_path: str, min_speakers: int, max_speakers: int) -> dict:
         cluster = label_map.setdefault(row["label"], len(label_map))
         turns.append({"start": row["start"], "end": row["end"], "cluster": cluster})
 
-    embedder = make_embedder("campp", wav_path)
+    signal, rate = _load_signal(wav_path)
+    embedder = make_embedder("campp", wav_path, signal)
     if embedder is None:
         notes.append("未找到 CAM++ 声纹提取模型，聚类将不做声纹先验匹配（可直接人工归属）。")
     for turn in turns:
@@ -670,7 +734,8 @@ def _make_pyannote_embedder(wav_path: str, signal: list[float] | None = None):
     extractor, so both sides stay in the same distribution, and a speaker-count
     sweep over the same spans only pays for the crops once.
     """
-    cached = _PYANNOTE_EMBEDDER_CACHE.get(wav_path)
+    with _CACHE_LOCK:
+        cached = _PYANNOTE_EMBEDDER_CACHE.get(wav_path)
     if cached is not None:
         return cached["extract"]
     try:
@@ -738,20 +803,29 @@ def _make_pyannote_embedder(wav_path: str, signal: list[float] | None = None):
             vectors[key] = vector
             return vector
 
-        _PYANNOTE_EMBEDDER_CACHE[wav_path] = {"extract": extract, "vectors": vectors}
+        with _CACHE_LOCK:
+            _PYANNOTE_EMBEDDER_CACHE[wav_path] = {"extract": extract, "vectors": vectors}
+            # Each cached entry pins an Inference model (hundreds of MB) plus
+            # every crop vector; keep only the most recent couple of files.
+            while len(_PYANNOTE_EMBEDDER_CACHE) > 2:
+                _PYANNOTE_EMBEDDER_CACHE.pop(next(iter(_PYANNOTE_EMBEDDER_CACHE)))
         return extract
     except Exception:
         return None
 
 
-def make_embedder(engine: str, wav_path: str):
-    """Return ``f(start, end) -> vector`` for the engine's feature space, or None."""
+def make_embedder(engine: str, wav_path: str, signal=None):
+    """Return ``f(start, end) -> vector`` for the engine's feature space, or None.
+
+    ``signal`` (the already-decoded mono audio) is optional; callers inside a
+    detection run pass it so the file is not decoded again.
+    """
     engine = ENGINE_ALIASES.get(engine, engine)
 
     if engine in ("pyannote", "voiceprint-cue"):
         # Same feature space (see embedder_for), so the same extractor: a
         # voiceprint enrolled under either engine stays valid for the other.
-        return _make_pyannote_embedder(wav_path)
+        return _make_pyannote_embedder(wav_path, signal)
 
     if engine == "campp":
         try:
@@ -759,35 +833,37 @@ def make_embedder(engine: str, wav_path: str):
 
             model = AutoModel(model="iic/speech_campplus_sv_zh-cn_16k-common",
                               device=_funasr_device())
+            if signal is None:
+                signal, rate = _load_signal(wav_path)
+            else:
+                rate = media.AUDIO_SAMPLE_RATE
 
             def extract(start: float, end: float) -> list[float]:
                 import tempfile
 
-                import media as m
-
-                handle, temp_path = tempfile.mkstemp(suffix=".wav")
-                import os as _os
-                _os.close(handle)
-                m.cut_wav(wav_path, start, end, temp_path)
-                try:
-                    result = model.generate(input=temp_path)
-                    for item in result or []:
-                        vector = item.get("spk_embedding")
-                        if vector is None:
-                            continue
-                        # funasr returns a tensor; may carry a batch dim.
-                        if hasattr(vector, "detach"):
-                            vector = vector.detach().cpu()
-                        if hasattr(vector, "numpy"):
-                            import numpy as _np
-                            vector = _np.asarray(vector).reshape(-1)
-                        values = [float(v) for v in list(vector)]
-                        return values if af.is_finite_vector(values) else []
-                finally:
-                    try:
-                        _os.remove(temp_path)
-                    except OSError:
-                        pass
+                # One temp WAV reused for every cue: slicing the in-memory signal
+                # with stdlib `wave` avoids an ffmpeg process launch per turn.
+                temp_path = getattr(extract, "_temp_path", None)
+                if temp_path is None:
+                    handle, temp_path = tempfile.mkstemp(suffix=".wav")
+                    import os as _os
+                    _os.close(handle)
+                    extract._temp_path = temp_path
+                _write_wav_slice(signal, rate, start, end, temp_path)
+                result = model.generate(input=temp_path)
+                for item in result or []:
+                    vector = item.get("spk_embedding")
+                    if vector is None:
+                        continue
+                    # funasr returns a tensor; may carry a batch dim.
+                    if hasattr(vector, "detach"):
+                        vector = vector.detach().cpu()
+                    if hasattr(vector, "numpy"):
+                        import numpy as _np
+                        vector = _np.asarray(vector).reshape(-1)
+                    values = [float(v) for v in list(vector)]
+                    if af.is_finite_vector(values):
+                        return values
                 return []
 
             return extract
@@ -795,7 +871,10 @@ def make_embedder(engine: str, wav_path: str):
             return None
 
     # builtin feature space
-    signal, rate = _load_signal(wav_path)
+    if signal is None:
+        signal, rate = _load_signal(wav_path)
+    else:
+        rate = media.AUDIO_SAMPLE_RATE
 
     def extract_builtin(start: float, end: float) -> list[float]:
         return af.segment_embedding(signal, rate, start, end)

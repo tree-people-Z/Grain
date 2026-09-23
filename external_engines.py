@@ -68,8 +68,9 @@ def _child_env() -> dict:
     """Give the runner the HF token/endpoint the app already has."""
     env = dict(os.environ)
     if not env.get("HF_TOKEN"):
-        data_dir = env.get("SSP_DATA_DIR") or os.path.join(BASE_DIR, "data")
-        token_file = os.path.join(data_dir, "hf_token.txt")
+        # Same resolution as the rest of the app (honours SSP_DATA_DIR), so a
+        # test run never reads the real user's token file.
+        token_file = os.path.join(apppaths.data_dir(), "hf_token.txt")
         try:
             with open(token_file, "r", encoding="utf-8-sig") as handle:
                 token = handle.read().strip()

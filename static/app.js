@@ -51,6 +51,12 @@ const state = {
   laneCache: null,      // reused lane DOM, rebuilt only when the lanes change
   waveCache: null,      // offscreen waveform strip, re-sliced instead of resampled
   blockNodes: new Map(),// id -> reused clip node, so a gesture never rebuilds the DOM
+  roleMap: new Map(),   // id -> role, so hot render loops never linear-search roles
+  segIndex: null,       // {sorted, starts, edges}: binary-searchable cue index
+  segById: new Map(),   // id -> segment hash map for O(1) lookup
+  laneGroupsCache: null,// {project, groups}: rebuilt only when the project changes
+  speakerUi: null,      // cached speaker-button DOM, only active classes update
+  cssVars: null,        // cached :root custom properties (theme changes rarely)
 };
 
 const el = (id) => document.getElementById(id);
@@ -103,6 +109,7 @@ function applyTheme() {
     : prefs.theme;
   root.dataset.theme = theme;
   root.dataset.accent = prefs.accent;
+  state.cssVars = null;  // theme/accent changed: the cached custom props are stale
 }
 
 /* Toggle straight to the opposite of what is currently on screen. */
@@ -221,11 +228,45 @@ function setBusy(text) {
 
 function roleById(id) {
   if (id === null || id === undefined) return null;
-  return (state.project?.roles || []).find((r) => r.id === id) || null;
+  return state.roleMap.get(id)
+    || (state.project?.roles || []).find((r) => r.id === id) || null;
 }
 
 function segmentById(id) {
+  const index = state.segIndex;
+  if (index && state.segById) return state.segById.get(id) || null;
   return (state.project?.segments || []).find((s) => s.id === id) || null;
+}
+
+/* Cue lookups by id and by time must not scan the whole list: `segmentById`
+   runs on every selection change and `segmentAtTime` runs every animation frame
+   during playback. Build sorted arrays + hash maps once per project instead. */
+function buildSegmentIndex() {
+  const segments = state.project?.segments || [];
+  const sorted = [...segments].sort((a, b) => a.start - b.start);
+  const starts = sorted.map((s) => s.start);
+  const edges = [];
+  const byId = new Map();
+  for (const seg of segments) byId.set(seg.id, seg);
+  for (const seg of sorted) { edges.push(seg.start, seg.end); }
+  edges.sort((a, b) => a - b);
+  state.segIndex = { sorted, starts, edges };
+  state.segById = byId;
+}
+
+/* Cached :root custom properties. `getComputedStyle` forces a style recalc;
+   calling it on every render frame was measurable, and the theme changes only
+   on an explicit toggle (which clears this cache via `applyTheme`). */
+function cssVars() {
+  if (state.cssVars) return state.cssVars;
+  const root = getComputedStyle(document.documentElement);
+  state.cssVars = {
+    mono: root.getPropertyValue("--mono").trim(),
+    accent: root.getPropertyValue("--accent").trim(),
+    grid: root.getPropertyValue("--line-2").trim(),
+    muted: root.getPropertyValue("--muted").trim(),
+  };
+  return state.cssVars;
 }
 
 function currentSegments() {
@@ -353,7 +394,14 @@ function applyProject(project) {
     state.blockNodes = new Map();
     state.laneCache = null;
     state.seekTarget = null;
+    state.speakerUi = null;
   }
+  // Indexes and the lane-group cache depend on this exact project object. Every
+  // mutation replaces it, so an identity check is enough to invalidate them —
+  // this is what keeps per-frame rendering O(visible) instead of O(all cues).
+  buildSegmentIndex();
+  state.roleMap = new Map((project.roles || []).map((role) => [role.id, role]));
+  state.laneGroupsCache = null;
   if (state.selectedId === null || !segmentById(state.selectedId)) {
     state.selectedId = project.segments.length ? project.segments[0].id : null;
   }
@@ -388,7 +436,7 @@ function renderSide() {
     roleHost.innerHTML = "";
     const roles = project.roles || [];
     if (!roles.length) {
-      roleHost.innerHTML = '<div class="hint">还没有角色。点「+ 新增」或在检测后命名待定角色。</div>';
+      roleHost.innerHTML = '<div class="hint">还没有角色。点「+ 新增」创建角色，检测匹配上后会自动归属。</div>';
     }
     // One tally pass instead of a full scan per role (1904 cues x N roles).
     const counts = new Map();
@@ -647,12 +695,34 @@ function renderVideoOverlay() {
   translationNode.textContent = cueTranslation(seg);
 }
 
-/* The cue covering `time`, or null in a gap between cues. */
+/* The cue covering `time`, or null in a gap between cues. Binary search over
+   the start-sorted index: this runs on every animation frame while playing, and
+   a linear scan over thousands of cues dominated the frame budget. */
 function segmentAtTime(time) {
   if (!state.project) return null;
-  return state.project.segments.find(
-    (s) => time >= s.start - 0.02 && time < s.end
-  ) || null;
+  const index = state.segIndex;
+  if (!index || !index.sorted.length) {
+    return state.project.segments.find(
+      (s) => time >= s.start - 0.02 && time < s.end
+    ) || null;
+  }
+  const threshold = time + 0.02;
+  const { sorted, starts } = index;
+  let lo = 0, hi = starts.length - 1, pos = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (starts[mid] <= threshold) { pos = mid; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  if (pos < 0) return null;
+  const seg = sorted[pos];
+  if (time < seg.end) return seg;
+  // Overlapping cues are rare; check a small neighbourhood before giving up.
+  for (let i = pos - 1; i >= 0 && i >= pos - 3; i -= 1) {
+    const candidate = sorted[i];
+    if (candidate.end > time && candidate.start <= threshold) return candidate;
+  }
+  return null;
 }
 
 /* Which text to show for a cue, honouring the language toggle. */
@@ -785,8 +855,16 @@ function positionLaneBars(groupBars, viewStart, pps, width) {
 /* Lanes are structural (one row per speaker) and change only when detection
    runs or roles are remapped, so the DOM is built once and then re-positioned.
    Rebuilding it on every pan frame was the bulk of the drag stutter. */
-function renderLanes(container, viewStart, pps, width) {
+function cachedLaneGroups() {
+  const cache = state.laneGroupsCache;
+  if (cache && cache.project === state.project) return cache.groups;
   const groups = laneGroups();
+  state.laneGroupsCache = { project: state.project, groups };
+  return groups;
+}
+
+function renderLanes(container, viewStart, pps, width) {
+  const groups = cachedLaneGroups();
   const signature = groups
     .map((g) => `${g.key}\u0001${g.label}\u0001${g.color}\u0001${g.spans.length}`)
     .join("\u0002");
@@ -922,11 +1000,11 @@ function renderTrack() {
     document.documentElement.style.setProperty("--lane-gutter", `${geom.gutter}px`);
     state.laneGutterPx = geom.gutter;
   }
-  const rootStyle = getComputedStyle(document.documentElement);
-  const monoFont = rootStyle.getPropertyValue("--mono").trim();
-  const accentColor = rootStyle.getPropertyValue("--accent").trim();
-  const gridColor = rootStyle.getPropertyValue("--line-2").trim();
-  const labelColor = rootStyle.getPropertyValue("--muted").trim();
+  const vars = cssVars();
+  const monoFont = vars.mono;
+  const accentColor = vars.accent;
+  const gridColor = vars.grid;
+  const labelColor = vars.muted;
   renderRuler(el("ruler"), el("ruler").getContext("2d"), width, viewStart, pps, duration, dpr,
               monoFont, accentColor, gridColor, labelColor);
   renderLanes(el("lanes"), viewStart, pps, width);
@@ -1112,35 +1190,49 @@ function renderCurrent() {
   badge.style.cursor = role ? "pointer" : "";
   badge.onclick = role ? () => renameRole(role.id) : null;
 
-  // Speaker buttons (pills driven by --role-color).
+  // Speaker buttons (pills driven by --role-color). The DOM is built once per
+  // role set and only the `.active` class flips afterwards: rebuilding these on
+  // every cue change churned nodes and re-bound listeners during playback.
   const host = el("speaker-buttons");
-  host.innerHTML = "";
   const roles = (state.project.roles || []).filter((r) => r.type !== "ignored");
-  roles.forEach((role, index) => {
-    const btn = document.createElement("button");
-    btn.className = "speaker-btn" + (seg.speaker_id === role.id ? " active" : "");
-    btn.style.setProperty("--role-color", role.color);
-    // The palette is tuned for dark backgrounds; on white an active pill needs a
-    // deeper fill so white text keeps enough contrast.
-    btn.style.setProperty("--role-color-ink", shade(role.color, -0.34));
-    btn.innerHTML = `${escapeHtml(role.name)}<span class="key">${index < 9 ? index + 1 : ""}</span>`;
-    btn.title = `${role.name}${role.type === "pending" ? "（待定）" : ""} — 点击归属，双击改名`;
-    btn.addEventListener("click", () => onSpeakerClick(role.id));
-    btn.addEventListener("dblclick", (event) => { event.preventDefault(); renameRole(role.id); });
-    host.appendChild(btn);
-  });
-  const pendingBtn = document.createElement("button");
-  pendingBtn.className = "speaker-btn pending-btn" + (seg.speaker_id === null ? " active" : "");
-  pendingBtn.innerHTML = `待定<span class="key">0</span>`;
-  pendingBtn.addEventListener("click", () => onSpeakerClick(null));
-  host.appendChild(pendingBtn);
+  const signature = roles
+    .map((r) => `${r.id}\u0001${r.name}\u0001${r.color}\u0001${r.type}`).join("\u0002");
+  if (!state.speakerUi || state.speakerUi.host !== host
+      || state.speakerUi.signature !== signature) {
+    host.innerHTML = "";
+    const buttons = new Map();
+    roles.forEach((role, index) => {
+      const btn = document.createElement("button");
+      btn.className = "speaker-btn";
+      btn.style.setProperty("--role-color", role.color);
+      // The palette is tuned for dark backgrounds; on white an active pill needs
+      // a deeper fill so white text keeps enough contrast.
+      btn.style.setProperty("--role-color-ink", shade(role.color, -0.34));
+      btn.innerHTML = `${escapeHtml(role.name)}<span class="key">${index < 9 ? index + 1 : ""}</span>`;
+      btn.title = `${role.name}${role.type === "pending" ? "（待定）" : ""} — 点击归属，双击改名`;
+      btn.addEventListener("click", () => onSpeakerClick(role.id));
+      btn.addEventListener("dblclick", (event) => { event.preventDefault(); renameRole(role.id); });
+      host.appendChild(btn);
+      buttons.set(role.id, btn);
+    });
+    const pendingBtn = document.createElement("button");
+    pendingBtn.className = "speaker-btn pending-btn";
+    pendingBtn.innerHTML = `待定<span class="key">0</span>`;
+    pendingBtn.addEventListener("click", () => onSpeakerClick(null));
+    host.appendChild(pendingBtn);
 
-  const addBtn = document.createElement("button");
-  addBtn.className = "speaker-btn";
-  addBtn.style.setProperty("--role-color", "var(--accent)");
-  addBtn.textContent = "+ 新增";
-  addBtn.addEventListener("click", () => promptNewRole());
-  host.appendChild(addBtn);
+    const addBtn = document.createElement("button");
+    addBtn.className = "speaker-btn";
+    addBtn.style.setProperty("--role-color", "var(--accent)");
+    addBtn.textContent = "+ 新增";
+    addBtn.addEventListener("click", () => promptNewRole());
+    host.appendChild(addBtn);
+    state.speakerUi = { host, signature, buttons, pendingBtn };
+  }
+  for (const [id, btn] of state.speakerUi.buttons) {
+    btn.classList.toggle("active", seg.speaker_id === id);
+  }
+  state.speakerUi.pendingBtn.classList.toggle("active", seg.speaker_id === null);
 }
 
 /* Name a diarised speaker without leaving the review flow. */
@@ -1586,16 +1678,22 @@ function seekToPointer(event) {
 function snapTime(time) {
   if (!prefs.snap || !state.project) return time;
   const tolerance = Math.min(8 / state.pxPerSecond, 0.75);
-  let best = time;
-  let bestDist = tolerance;
-  for (const seg of state.project.segments) {
-    for (const edge of [seg.start, seg.end]) {
-      const d = Math.abs(edge - time);
-      if (d < bestDist) {
-        bestDist = d;
-        best = edge;
-      }
-    }
+  const edges = state.segIndex?.edges;
+  if (!edges || !edges.length) return time;
+  // Binary search the pre-sorted edge list, then test the two neighbours. This
+  // runs on every pointermove while scrubbing, so scanning all cue edges was
+  // the scrub's dominant cost on long recordings.
+  let lo = 0, hi = edges.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (edges[mid] < time) lo = mid + 1;
+    else hi = mid;
+  }
+  let best = time, bestDist = tolerance;
+  for (const index of [lo - 1, lo]) {
+    if (index < 0 || index >= edges.length) continue;
+    const dist = Math.abs(edges[index] - time);
+    if (dist < bestDist) { bestDist = dist; best = edges[index]; }
   }
   return best;
 }
@@ -1683,7 +1781,7 @@ function bindGlobalListeners() {
         for (const id of drag.baseline) picked.add(id);
       }
       state.selection = picked;
-      renderTrack();
+      queueTrackRender();
       // The queue is a long list; only touch it when the picked set actually moves.
       const stamp = picked.size;
       if (drag.lastStamp !== stamp) {
@@ -1730,10 +1828,18 @@ function bindGlobalListeners() {
     }
   });
 
+  // Resize fires in bursts; coalesce to one layout + redraw per frame so a
+  // window drag does not run fitMediaPane (a forced layout) dozens of times.
+  let resizeQueued = false;
   window.addEventListener("resize", () => {
-    if (!state.project) return;
-    fitMediaPane(state.media, state.project.media_kind === "audio");
-    renderTrack();
+    if (!state.project || resizeQueued) return;
+    resizeQueued = true;
+    requestAnimationFrame(() => {
+      resizeQueued = false;
+      if (!state.project) return;
+      fitMediaPane(state.media, state.project.media_kind === "audio");
+      renderTrack();
+    });
   });
 
   document.addEventListener("keydown", onKeyDown);
@@ -1770,7 +1876,13 @@ function bindWorkspace() {
       renderQueue();
     });
   });
-  el("search").addEventListener("input", (e) => { state.search = e.target.value; renderQueue(); });
+  // Filtering re-scans every cue and re-builds the list, so debounce keystrokes.
+  let searchTimer = null;
+  el("search").addEventListener("input", (e) => {
+    state.search = e.target.value;
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { searchTimer = null; renderQueue(); }, 120);
+  });
 
 }
 
@@ -1999,7 +2111,7 @@ function openRoleManager() {
       body.innerHTML = `
         <p class="hint">重命名、改色、合并同一人的不同聚类，或把声纹写入全局角色库（跨项目复用）。</p>
         <div class="role-actions">
-          <span class="hint">「待定角色」由检测为未匹配聚类自动生成；命名后入库，或在此一键清理。</span>
+          <span class="hint">「待定角色」是旧版本检测遗留的聚类占位；命名后入库，或在此一键清理。</span>
           <button id="purge-pending-btn" class="btn ghost sm danger"${pending.length ? "" : " disabled"}>清理全部待定角色${pending.length ? `（${pending.length}）` : ""}</button>
         </div>
         <div class="file-list" id="role-list"></div>
@@ -2110,7 +2222,7 @@ function openDetectModal() {
     .join("");
   modal("运行说话人检测", (body) => {
     body.innerHTML = `
-      <p class="hint">检测结果会自动与字幕时间轴对齐并按置信度归属；未匹配到已知角色的聚类会成为“待定角色”。</p>
+      <p class="hint">检测结果会自动与字幕时间轴对齐并按置信度归属；匹配不上你已创建角色的聚类，其字幕会保持「待定」，由你人工归属（宁可漏、不误判）。</p>
       <div class="field"><label>检测引擎</label><select id="d-engine">${options}</select><div class="hint" id="d-engine-note"></div></div>
       <div class="device-row" id="d-device"></div>
       <div class="field-row">
@@ -2480,7 +2592,7 @@ function openSettings() {
               <input type="number" id="set-max" min="1" value="${cfg.max_speakers ?? 6}" style="width:70px">
             </div>`))}
         ${group("声纹先验",
-          row("匹配阈值", "自动 = 按引擎特征空间校准（pyannote≈0.62 / CAM++≈0.72 / 内置≈0.80）", `
+          row("匹配阈值", "自动 = 按引擎特征空间校准（pyannote≈0.66 / CAM++≈0.76 / 内置≈0.84）；匹配不上的聚类保持待定", `
             <div class="range-inputs">
               <label class="check inline"><input type="checkbox" id="set-threshold-auto" ${cfg.threshold == null ? "checked" : ""}> 自动</label>
               <input type="range" id="set-threshold" min="0.5" max="1" step="0.01" value="${cfg.threshold ?? 0.8}" ${cfg.threshold == null ? "disabled" : ""}>

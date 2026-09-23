@@ -113,11 +113,16 @@ def enroll(role: dict, wav_path: str, start: float, end: float, source: str = ""
 # CAM++) separate speakers well but same-speaker cosines drop in noisy audio, so
 # their bar sits lower than the uncalibrated builtin envelope space — where all
 # vectors are near-parallel and only a tiny lead means anything.
+#
+# The bars are deliberately strict: a cluster that does not clearly match a
+# user-created role is left unmatched and its cues stay 待定 for review. Missing
+# a real match costs one manual assignment; a wrong match silently poisons the
+# dataset, so we prefer the miss.
 # (threshold, margin); threshold None on the caller side selects the default.
 EMBEDDER_MATCH = {
-    "pyannote": (0.62, 0.05),
-    "campp": (0.72, 0.04),
-    "builtin": (0.80, 0.004),
+    "pyannote": (0.66, 0.07),
+    "campp": (0.76, 0.06),
+    "builtin": (0.84, 0.006),
 }
 
 
@@ -134,7 +139,8 @@ def map_clusters(clusters: dict, roles: list[dict], threshold: float | None = No
     (``None`` = the feature space's calibrated default), leads any runner-up role
     for that cluster by the feature-space margin, and neither side is already
     claimed — one role owns one cluster. Remaining clusters are reported
-    anonymous so the caller can create "待定" roles.
+    anonymous; the caller leaves their cues 待定 rather than inventing a role
+    (prefer a miss over a mis-assignment).
     Returns ({cluster: {role_id, score, matched}}, notes).
     """
     default_threshold, margin = match_defaults(embedder)
@@ -210,7 +216,7 @@ def map_clusters(clusters: dict, roles: list[dict], threshold: float | None = No
         notes.append("先验声纹匹配成功：" + "、".join(matched_names) + "。")
     unmatched = sum(1 for v in mapping.values() if not v["matched"])
     if unmatched:
-        notes.append(f"{unmatched} 个聚类未匹配到已知角色，已标记为待定角色。")
+        notes.append(f"{unmatched} 个聚类未匹配到已创建的角色，相关字幕保持待定（可人工归属）。")
     if matchable_roles:
         # Show each cluster's best candidate score so a near miss is visible
         # (a low best score means the voices genuinely differ, not a bug).

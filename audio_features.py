@@ -15,6 +15,13 @@ import array
 import math
 import wave
 
+try:  # NumPy is present whenever a neural engine (torch) is installed.
+    import numpy as _np
+except Exception:  # pragma: no cover - base install stays dependency-free
+    _np = None
+
+HAS_NUMPY = _np is not None
+
 FRAME_MS = 25.0
 HOP_MS = 10.0
 FFT_SIZE = 512
@@ -25,31 +32,71 @@ MAX_PITCH_HZ = 320.0
 
 # --- FFT --------------------------------------------------------------------
 
-def _fft(values: list[float]) -> list[complex]:
-    """Iterative radix-2 Cooley-Tukey FFT. ``len(values)`` must be a power of 2."""
-    size = len(values)
-    if size & (size - 1):
-        raise ValueError("FFT size must be a power of two")
+# Bit-reversal permutation and per-stage twiddle factors, built once per size
+# and reused for every frame. The old implementation formatted/reversed a binary
+# string for every sample of every frame, which dominated feature extraction.
+_FFT_PLANS: dict[int, tuple[list[int], list[tuple[int, list[complex]]]]] = {}
+
+
+def _fft_plan(size: int):
+    plan = _FFT_PLANS.get(size)
+    if plan is not None:
+        return plan
     bits = size.bit_length() - 1
-    data = [complex(v, 0.0) for v in values]
+    reversal = [0] * size
     for index in range(size):
-        reversed_index = int(f"{index:0{bits}b}"[::-1], 2)
-        if reversed_index > index:
-            data[index], data[reversed_index] = data[reversed_index], data[index]
+        value, reversed_index = index, 0
+        for _ in range(bits):
+            reversed_index = (reversed_index << 1) | (value & 1)
+            value >>= 1
+        reversal[index] = reversed_index
+    stages: list[tuple[int, list[complex]]] = []
     length = 2
     while length <= size:
         angle = -2.0 * math.pi / length
         step = complex(math.cos(angle), math.sin(angle))
-        for start in range(0, size, length):
-            factor = complex(1.0, 0.0)
-            for offset in range(length // 2):
-                even = data[start + offset]
-                odd = data[start + offset + length // 2] * factor
-                data[start + offset] = even + odd
-                data[start + offset + length // 2] = even - odd
-                factor *= step
+        roots = [complex(1.0, 0.0)] * (length // 2)
+        factor = complex(1.0, 0.0)
+        for offset in range(length // 2):
+            roots[offset] = factor
+            factor *= step
+        stages.append((length, roots))
         length *= 2
+    plan = (reversal, stages)
+    _FFT_PLANS[size] = plan
+    return plan
+
+
+def _fft(values) -> list[complex]:
+    """Iterative radix-2 Cooley-Tukey FFT. ``len(values)`` must be a power of 2."""
+    size = len(values)
+    if size & (size - 1):
+        raise ValueError("FFT size must be a power of two")
+    reversal, stages = _fft_plan(size)
+    data = [complex(v, 0.0) for v in values]
+    for index in range(size):
+        reversed_index = reversal[index]
+        if reversed_index > index:
+            data[index], data[reversed_index] = data[reversed_index], data[index]
+    for length, roots in stages:
+        half = length // 2
+        for start in range(0, size, length):
+            for offset in range(half):
+                even = data[start + offset]
+                odd = data[start + offset + half] * roots[offset]
+                data[start + offset] = even + odd
+                data[start + offset + half] = even - odd
     return data
+
+
+def _power_spectrum(values) -> list[float]:
+    """Power (|X|^2) for FFT bins ``1 .. N/2-1``. NumPy when available."""
+    size = len(values)
+    if _np is not None:
+        spectrum = _np.fft.rfft(_np.asarray(values, dtype=_np.float64))
+        return (_np.abs(spectrum[1:size // 2]) ** 2).tolist()
+    data = _fft(values)
+    return [abs(data[i]) ** 2 for i in range(1, size // 2)]
 
 
 def _hann(size: int) -> list[float]:
@@ -76,8 +123,14 @@ def _band_edges(sample_rate: int, count: int) -> list[tuple[int, int]]:
 
 # --- WAV loading ------------------------------------------------------------
 
-def read_wav(path: str, target_rate: int = 16000) -> tuple[list[float], int]:
-    """Read a mono 16-bit PCM WAV into floats in [-1, 1]."""
+def read_wav(path: str, target_rate: int = 16000) -> tuple["array.array[float]", int]:
+    """Read a mono 16-bit PCM WAV into floats in [-1, 1].
+
+    Returns an ``array('f')`` (4 bytes/sample) rather than a Python ``list`` of
+    floats (~32 bytes/sample): an hour of 16 kHz audio drops from >1.5 GB to
+    ~230 MB. It still behaves like a sequence (``len``, slicing, truthiness), so
+    callers are unaffected. NumPy, when installed, converts it with no copy.
+    """
     with wave.open(path, "rb") as handle:
         channels = handle.getnchannels()
         width = handle.getsampwidth()
@@ -88,32 +141,64 @@ def read_wav(path: str, target_rate: int = 16000) -> tuple[list[float], int]:
     samples = array.array("h")
     samples.frombytes(frames)
     if channels > 1:
-        mono = [
-            sum(samples[i + c] for c in range(channels)) / channels
-            for i in range(0, len(samples), channels)
-        ]
+        mono = array.array("f")
+        append = mono.append
+        for i in range(0, len(samples) - channels + 1, channels):
+            append(sum(samples[i:i + channels]) / (channels * 32768.0))
     else:
-        mono = list(samples)
-    signal = [v / 32768.0 for v in mono]
+        mono = array.array("f", (v / 32768.0 for v in samples))
+    signal = mono
     if rate != target_rate:
         signal = _resample(signal, rate, target_rate)
         rate = target_rate
     return signal, rate
 
 
-def _resample(signal: list[float], src_rate: int, dst_rate: int) -> list[float]:
+def waveform_peaks(signal, buckets: int = 1200) -> list[float]:
+    """Downsample a signal to ``buckets`` normalised peak values for drawing.
+
+    Vectorised with NumPy when present; the old per-bucket ``max(abs(...))``
+    generator decoded the whole file into Python floats just to take maxima.
+    """
+    if not signal or buckets <= 0:
+        return []
+    size = max(1, math.ceil(len(signal) / buckets))
+    if _np is not None:
+        data = _np.asarray(signal, dtype=_np.float32)
+        count = math.ceil(len(data) / size)
+        padding = count * size - len(data)
+        if padding:
+            data = _np.pad(data, (0, padding))
+        peaks = _np.abs(data.reshape(count, size)).max(axis=1)
+        ceiling = float(peaks.max()) if peaks.size else 0.0
+        if ceiling > 0:
+            peaks = _np.minimum(1.0, peaks / ceiling)
+        return [round(float(value), 4) for value in peaks]
+    peaks = []
+    for index in range(0, len(signal), size):
+        window = signal[index:index + size]
+        peaks.append(max(abs(value) for value in window))
+    ceiling = max(peaks) if peaks else 1.0
+    if ceiling > 0:
+        peaks = [min(1.0, value / ceiling) for value in peaks]
+    return [round(value, 4) for value in peaks]
+
+
+def _resample(signal, src_rate: int, dst_rate: int) -> "array.array[float]":
     """Linear-interpolation resample; adequate for feature extraction."""
     if not signal:
-        return []
+        return array.array("f")
     ratio = dst_rate / src_rate
     out_len = int(len(signal) * ratio)
-    output = []
+    output = array.array("f")
+    append = output.append
+    last = len(signal) - 1
     for i in range(out_len):
         position = i / ratio
         left = int(position)
-        right = min(left + 1, len(signal) - 1)
+        right = left + 1 if left + 1 <= last else last
         frac = position - left
-        output.append(signal[left] * (1 - frac) + signal[right] * frac)
+        append(signal[left] * (1 - frac) + signal[right] * frac)
     return output
 
 
@@ -132,8 +217,7 @@ def _frame_features(signal: list[float], rate: int, start: int, end: int,
         windowed = [frame[i] * _WINDOW[i] for i in range(frame_len)]
         if frame_len < FFT_SIZE:
             windowed += [0.0] * (FFT_SIZE - frame_len)
-        spectrum = _fft(windowed)
-        power = [abs(spectrum[i]) ** 2 for i in range(1, FFT_SIZE // 2)]
+        power = _power_spectrum(windowed)
         total = sum(power) + 1e-12
 
         vector = []
@@ -158,23 +242,43 @@ def _frame_features(signal: list[float], rate: int, start: int, end: int,
     return vectors
 
 
-def _pitch(frame: list[float], rate: int) -> float:
+def _pitch(frame, rate: int) -> float:
     """Normalised autocorrelation pitch in Hz, or 0 when unvoiced."""
     if not frame:
         return 0.0
     energy = sum(v * v for v in frame)
     if energy < 1e-6:
         return 0.0
+    length = len(frame)
     min_lag = int(rate / MAX_PITCH_HZ)
-    max_lag = min(int(rate / MIN_PITCH_HZ), len(frame) - 1)
+    max_lag = min(int(rate / MIN_PITCH_HZ), length - 1)
     if max_lag <= min_lag:
         return 0.0
-    best_lag, best_score = 0, 0.0
-    for lag in range(min_lag, max_lag):
-        score = sum(frame[i] * frame[i + lag] for i in range(len(frame) - lag))
-        score /= math.sqrt(energy * sum(frame[i] * frame[i] for i in range(len(frame) - lag)) + 1e-12)
-        if score > best_score:
-            best_score, best_lag = score, lag
+
+    if _np is not None:
+        x = _np.asarray(frame, dtype=_np.float64)
+        cumulative = _np.concatenate(([0.0], _np.cumsum(x * x)))
+        # ac[k] = sum_i x[i] * x[i+k]
+        autocorr = _np.correlate(x, x, mode="full")[length - 1:]
+        lags = _np.arange(min_lag, max_lag)
+        tail_energy = cumulative[length - lags]
+        scores = autocorr[min_lag:max_lag] / _np.sqrt(energy * tail_energy + 1e-12)
+        best = int(_np.argmax(scores))
+        best_score = float(scores[best])
+        best_lag = min_lag + best
+    else:
+        # Prefix sums make the per-lag normaliser O(1) instead of O(L).
+        cumulative = [0.0] * (length + 1)
+        for i, v in enumerate(frame):
+            cumulative[i + 1] = cumulative[i] + v * v
+        best_lag, best_score = 0, 0.0
+        for lag in range(min_lag, max_lag):
+            count = length - lag
+            score = sum(frame[i] * frame[i + lag] for i in range(count))
+            score /= math.sqrt(energy * cumulative[count] + 1e-12)
+            if score > best_score:
+                best_score, best_lag = score, lag
+
     if best_score < 0.35 or best_lag == 0:
         return 0.0
     return rate / best_lag

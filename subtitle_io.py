@@ -11,6 +11,7 @@ corrected by a human) or "pending" (not assigned yet).
 
 from __future__ import annotations
 
+import bisect
 import re
 
 # --- timecode helpers -------------------------------------------------------
@@ -281,12 +282,27 @@ def merge_translations(segments: list[dict], others: list[dict]) -> int:
     Used for the two-file workflow (e.g. ``video.zh.srt`` + ``video.en.srt``).
     Returns the number of cues that received a translation.
     """
+    if not others:
+        return 0
+    # Interval-indexed scan instead of the old O(n×m) double loop. Sort the
+    # translation track once, advance a pointer past cues that end before the
+    # segment, and binary-search the upper bound: everything outside [j, right)
+    # has zero overlap, so the best match is unchanged.
+    ordered = sorted(others, key=lambda other: other["start"])
+    starts = [other["start"] for other in ordered]
+    ends = [other["end"] for other in ordered]
+    total = len(ordered)
     matched = 0
-    for segment in segments:
+    j = 0
+    for segment in sorted(segments, key=lambda item: item["start"]):
+        seg_start, seg_end = segment["start"], segment["end"]
+        while j < total and ends[j] <= seg_start:
+            j += 1
+        right = bisect.bisect_left(starts, seg_end)
         best, best_overlap = None, 0.0
-        for other in others:
-            overlap = (min(segment["end"], other["end"])
-                       - max(segment["start"], other["start"]))
+        for k in range(j, right):
+            other = ordered[k]
+            overlap = min(seg_end, other["end"]) - max(seg_start, other["start"])
             if overlap > best_overlap:
                 best_overlap, best = overlap, other
         if best is not None and best_overlap > 0.05:

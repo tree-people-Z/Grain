@@ -1,21 +1,39 @@
-# 专业检测引擎（推荐，一次装齐）
-# pyannote.audio 3.x / 4.x 都支持：4.x 用 wespeaker 声纹，且不再依赖 torchcodec 读文件
-torch>=2.6
-torchaudio
-pyannote.audio>=3.1
-funasr
-modelscope
-addict
-simplejson
-datasets
-hdbscan
+# ---------------------------------------------------------------------------
+# Grain dependency sets
+#
+# Base functionality (import / review / export, built-in + manual engines) has
+# ZERO third-party dependencies — just Python 3.10+ and ffmpeg on PATH. Nothing
+# below is needed unless you want an automatic detection engine.
+#
+# Install everything for the professional engines (recommended):
+#     pip install -r requirements.txt
+#
+# Upper bounds are deliberate: torch/pyannote/datasets ship breaking changes on
+# new majors, and an unbounded `pip install` used to pull them silently.
+# ---------------------------------------------------------------------------
 
-# 可选：ASR 转录（无字幕时生成字幕用）
+# --- Detection engines -----------------------------------------------------
+torch>=2.6,<3
+torchaudio>=2.6,<3
+pyannote.audio>=3.1,<5          # community-1 (4.x) preferred, 3.1 fallback
+funasr>=1.1,<2                  # 3D-Speaker / CAM++ engine
+modelscope>=1.20,<2             # model download for CAM++
+addict>=2.4
+simplejson>=3.19
+datasets>=2.20,<6
+hdbscan>=0.8.40
+
+# Optional NumPy acceleration for the built-in feature path (also pulled in by
+# torch). Everything still works without it.
+numpy>=1.24,<3
+
+# --- Optional: ASR transcript when a file has no subtitles -----------------
 # faster-whisper
 
-# 可选：桌面版原生窗口（启动桌面版.bat / desktop_pywebview.py 需要）
-# 打包：pyinstaller
+# --- Optional: desktop shell (启动桌面版.bat / desktop_pywebview.py) ------
 # pywebview
+# pyinstaller
 
-# 可选：外挂引擎（如 Sortformer）隔离环境由 uv 创建，见 scripts/setup_engine.py
+# --- Optional: external engines (Sortformer) ---------------------------------
+# Their isolated venv is created with uv; see scripts/setup_engine.py
 # uv

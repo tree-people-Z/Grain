@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import json
-import math
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -15,6 +16,7 @@ import align as aligner
 import apppaths
 import dataset_export
 import diarize
+import jsonutil
 import media
 import roles as rolelib
 import subtitle_io as sio
@@ -45,8 +47,7 @@ def load_settings() -> dict:
     settings = dict(DEFAULT_SETTINGS)
     if os.path.exists(SETTINGS_PATH):
         try:
-            with open(SETTINGS_PATH, "r", encoding="utf-8-sig") as handle:
-                stored = json.load(handle)
+            stored = _read_json(SETTINGS_PATH, {})
             for key in DEFAULT_SETTINGS:
                 if key in stored and stored[key] is not None:
                     settings[key] = stored[key]
@@ -80,8 +81,7 @@ def save_settings(updates: dict) -> dict:
         # the previous value when the update omits them.
         if key in updates and (updates[key] is not None or key == "threshold"):
             settings[key] = updates[key]
-    with open(SETTINGS_PATH, "w", encoding="utf-8") as handle:
-        json.dump(settings, handle, ensure_ascii=False, indent=2)
+    _write_json(SETTINGS_PATH, settings, indent=2)
     if token:
         token = str(token).strip()
         if token:
@@ -111,9 +111,57 @@ def _ensure_dirs() -> None:
         os.makedirs(path, exist_ok=True)
 
 
+# Parsed-JSON cache keyed by path and (mtime_ns, size). `state_payload` reads the
+# library and settings on nearly every request; without this the same files were
+# re-read and re-parsed several times per page load. Writes invalidate eagerly
+# (mtime alone can collide on a same-tick rewrite of equal length).
+_CACHE_LOCK = threading.RLock()
+_JSON_CACHE: dict[str, tuple[tuple[int, int], object]] = {}
+
+
+def _invalidate(path: str) -> None:
+    with _CACHE_LOCK:
+        _JSON_CACHE.pop(path, None)
+
+
+def _write_json(path: str, data, indent: int | None = None) -> None:
+    """Write JSON atomically: a crash mid-write must not truncate the target.
+
+    The old direct write left a half-file behind, which `list_projects` then
+    swallowed silently — the whole project vanished from the UI. Writing to a
+    sibling temp file and ``os.replace`` makes the swap atomic.
+    """
+    tmp = f"{path}.{uuid.uuid4().hex[:8]}.tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=indent)
+    os.replace(tmp, path)
+    _invalidate(path)
+
+
+def _read_json(path: str, default):
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return copy.deepcopy(default)
+    key = (stat.st_mtime_ns, stat.st_size)
+    with _CACHE_LOCK:
+        hit = _JSON_CACHE.get(path)
+        if hit is not None and hit[0] == key:
+            return copy.deepcopy(hit[1])
+    with open(path, "r", encoding="utf-8-sig") as handle:
+        data = json.load(handle)
+    with _CACHE_LOCK:
+        _JSON_CACHE[path] = (key, data)
+    return copy.deepcopy(data)
+
+
 def _slug(text: str) -> str:
     cleaned = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", text or "").strip("_")
     return cleaned[:40] or "project"
+
+
+# Public alias: server.py names ASR output with it (was reaching into `_slug`).
+slug = _slug
 
 
 def normalize_path(path: str) -> str:
@@ -136,44 +184,58 @@ def project_path(project_id: str) -> str:
     return os.path.join(PROJECT_DIR, f"{project_id}.json")
 
 
-def _json_safe(value):
-    """NaN/Infinity -> None so stored projects are always valid JSON."""
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, dict):
-        return {key: _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    return value
-
-
 def save(project: dict) -> dict:
     _ensure_dirs()
     project["updated"] = datetime.now().isoformat(timespec="seconds")
-    with open(project_path(project["id"]), "w", encoding="utf-8") as handle:
-        json.dump(_json_safe(project), handle, ensure_ascii=False)
+    path = project_path(project["id"])
+    _write_json(path, jsonutil.json_safe(project))
+    # Same-tick rewrites of equal length can share (mtime, size); drop the
+    # summary explicitly so a review save is never shown stale in the list.
+    with _CACHE_LOCK:
+        _SUMMARY_CACHE.pop(os.path.basename(path), None)
     return project
 
 
 def load(project_id: str) -> dict:
     with open(project_path(project_id), "r", encoding="utf-8-sig") as handle:
-        return _json_safe(json.load(handle))
+        return jsonutil.json_safe(json.load(handle))
 
 
 def exists(project_id: str) -> bool:
     return os.path.exists(project_path(project_id))
 
 
+_SUMMARY_CACHE: dict[str, tuple[tuple[int, int], dict]] = {}
+
+
 def list_projects() -> list[dict]:
+    """Summarise every project, parsing only files whose (mtime, size) changed.
+
+    ``state_payload`` calls this on almost every request; the full-project cache
+    is deliberately not kept (projects can be large), so this per-file summary
+    cache is what keeps the project list cheap as the user accumulates files.
+    """
     _ensure_dirs()
-    items = []
+    items: list[dict] = []
+    seen: set[str] = set()
     for filename in os.listdir(PROJECT_DIR):
         if not filename.endswith(".json"):
             continue
+        path = os.path.join(PROJECT_DIR, filename)
         try:
-            with open(os.path.join(PROJECT_DIR, filename), "r", encoding="utf-8-sig") as handle:
-                project = json.load(handle)
-            items.append({
+            stat = os.stat(path)
+        except OSError:
+            continue
+        seen.add(filename)
+        key = (stat.st_mtime_ns, stat.st_size)
+        with _CACHE_LOCK:
+            hit = _SUMMARY_CACHE.get(filename)
+        if hit is not None and hit[0] == key:
+            items.append(copy.deepcopy(hit[1]))
+            continue
+        try:
+            project = _read_json(path, {})
+            summary = {
                 "id": project["id"],
                 "name": project.get("name"),
                 "media_path": project.get("media_path"),
@@ -182,9 +244,16 @@ def list_projects() -> list[dict]:
                 "updated": project.get("updated"),
                 "segments": len(project.get("segments", [])),
                 "stats": stats(project),
-            })
+            }
         except Exception:
             continue
+        with _CACHE_LOCK:
+            _SUMMARY_CACHE[filename] = (key, summary)
+        items.append(copy.deepcopy(summary))
+    with _CACHE_LOCK:
+        for name in list(_SUMMARY_CACHE):
+            if name not in seen:
+                _SUMMARY_CACHE.pop(name, None)
     items.sort(key=lambda item: item.get("updated") or "", reverse=True)
     return items
 
@@ -193,19 +262,15 @@ def list_projects() -> list[dict]:
 
 def load_library() -> list[dict]:
     _ensure_dirs()
-    if not os.path.exists(LIBRARY_PATH):
-        return []
     try:
-        with open(LIBRARY_PATH, "r", encoding="utf-8-sig") as handle:
-            return json.load(handle).get("roles", [])
+        return _read_json(LIBRARY_PATH, {"roles": []}).get("roles", [])
     except Exception:
         return []
 
 
 def save_library(library_roles: list[dict]) -> list[dict]:
     _ensure_dirs()
-    with open(LIBRARY_PATH, "w", encoding="utf-8") as handle:
-        json.dump({"roles": library_roles}, handle, ensure_ascii=False)
+    _write_json(LIBRARY_PATH, {"roles": library_roles})
     return library_roles
 
 
@@ -431,6 +496,85 @@ def work_wav(project: dict) -> str:
 
 # --- detection + alignment --------------------------------------------------
 
+def _refine_segments(project: dict, result: dict, cluster_to_role: dict,
+                     wanted_embedder: str, wav_path: str,
+                     overwrite_manual: bool, notes: list[str]) -> None:
+    """Re-decide cues by their own voiceprint where the engine used overlap only.
+
+    pyannote feature space only — the CAM++ embedder slices audio per call and
+    would be far too slow here. Failures are recorded as a note, never fatal.
+    """
+    if wanted_embedder != "pyannote" or result.get("engine") == "voiceprint-cue":
+        return
+    embedder = diarize.make_embedder(result["engine"], wav_path)
+    if embedder is None:
+        notes.append("声纹精修跳过：声纹模型不可用。")
+        return
+    try:
+        _reassigned, _filled, refine_notes = aligner.refine_with_voiceprints(
+            project["segments"], result.get("clusters", {}), cluster_to_role,
+            embedder, overwrite_manual=overwrite_manual,
+        )
+        notes.extend(refine_notes)
+    except Exception as exc:
+        notes.append(f"声纹精修跳过：{str(exc)[:120]}")
+
+
+def _apply_consensus(project: dict, result: dict, engine: str, sweep: bool,
+                     min_speakers: int, max_speakers: int, wav_path: str,
+                     spans: list, notes: list[str]) -> None:
+    """Cross-check the primary decisions with a complementary engine.
+
+    Cues the two engines disagree on go back to "pending" for review; consensus
+    only ever adds pending, never corrects. Any failure is a note, not an error.
+    """
+    primary = result.get("engine", engine)
+    secondary = diarize.consensus_engine_for(primary)
+    # Consensus needs both engines' clusters in the same voiceprint space.
+    if diarize.embedder_for(primary) != diarize.embedder_for(secondary):
+        notes.append("双引擎共识跳过：两引擎声纹特征空间不同，无法比对。")
+        return
+    if not diarize.engine_available(secondary):
+        notes.append(f"双引擎共识跳过：{secondary} 不可用。")
+        return
+    if sweep and result.get("sweep_k"):
+        c_min = c_max = int(result["sweep_k"])
+    else:
+        c_min, c_max = max(1, min_speakers), max(1, max_speakers)
+    try:
+        secondary_result = diarize.run(secondary, wav_path, spans, c_min, c_max)
+        secondary_segments = [dict(s) for s in project["segments"]]
+        secondary_segments, _ = aligner.align(
+            secondary_segments, secondary_result.get("turns", []),
+            {c: c for c in secondary_result.get("clusters", {})},
+        )
+        secondary_by_id = {s["id"]: s.get("cluster") for s in secondary_segments}
+        b_to_a = aligner.match_clusters(result.get("clusters", {}),
+                                        secondary_result.get("clusters", {}))
+        disagreed = 0
+        for segment in project["segments"]:
+            if segment.get("speaker_id") is None or segment.get("status") == "manual":
+                continue
+            other = secondary_by_id.get(segment["id"])
+            mapped = None if other is None else b_to_a.get(int(other))
+            if mapped is None or segment.get("cluster") is None:
+                continue  # secondary had nothing to say about this cue
+            if int(segment["cluster"]) != mapped:
+                segment["speaker_id"] = None
+                segment["status"] = "pending"
+                segment["confidence"] = None
+                segment["note"] = "双引擎不一致，待复核"
+                disagreed += 1
+        if disagreed:
+            notes.append(
+                f"双引擎共识（{primary} × {secondary}）：{disagreed} 条不一致，已标为待定。"
+            )
+        else:
+            notes.append(f"双引擎共识（{primary} × {secondary}）：结果一致。")
+    except Exception as exc:
+        notes.append(f"双引擎共识跳过：{str(exc)[:120]}")
+
+
 def run_detection(project: dict, engine: str = "manual", min_speakers: int = 1,
                   max_speakers: int = 6, threshold: float | None = DEFAULT_THRESHOLD,
                   overwrite_manual: bool = False, sweep: bool = False,
@@ -498,7 +642,7 @@ def run_detection(project: dict, engine: str = "manual", min_speakers: int = 1,
 
     name_to_role = {role["name"]: role["id"] for role in project["roles"]}
     cluster_to_role: dict[int, int] = {}
-    pending_created = 0
+    unmatched_clusters = 0
 
     for cluster_id in sorted(result.get("clusters", {})):
         entry = mapping.get(int(cluster_id), {})
@@ -520,15 +664,14 @@ def run_detection(project: dict, engine: str = "manual", min_speakers: int = 1,
                 cluster_to_role[int(cluster_id)] = new_role["id"]
                 notes.append(f"角色「{source['name']}」按先验声纹自动匹配成功。")
             else:
-                cluster_to_role[int(cluster_id)] = _ensure_pending_role(
-                    project, wanted_embedder, cluster_to_role)
-                pending_created += 1
+                unmatched_clusters += 1
         else:
-            cluster_to_role[int(cluster_id)] = _ensure_pending_role(
-                project, wanted_embedder, cluster_to_role)
-            pending_created += 1
+            # No confident match to a user-created role. Leave the cluster out of
+            # the map entirely so its cues fall through to 待定: a miss costs one
+            # manual assignment, a wrong auto-assignment silently corrupts the set.
+            unmatched_clusters += 1
 
-    # Rebuild name→role map because pending roles may have just been created.
+    # Rebuild name→role map because library roles may have just been created.
     name_to_role = {role["name"]: role["id"] for role in project["roles"]}
 
     project["segments"], align_notes = aligner.align(
@@ -537,83 +680,24 @@ def run_detection(project: dict, engine: str = "manual", min_speakers: int = 1,
     )
     notes.extend(align_notes)
 
-    # Voiceprint refinement: engines that decided cues by time overlap only can
-    # be corrected by each cue's own voiceprint (pyannote feature space only —
-    # the CAM++ embedder slices audio per call and would be far too slow here).
-    if wanted_embedder == "pyannote" and result.get("engine") != "voiceprint-cue":
-        embedder = diarize.make_embedder(result["engine"], wav_path)
-        if embedder is not None:
-            try:
-                reassigned, filled, refine_notes = aligner.refine_with_voiceprints(
-                    project["segments"], result.get("clusters", {}), cluster_to_role,
-                    embedder, overwrite_manual=overwrite_manual,
-                )
-                notes.extend(refine_notes)
-            except Exception as exc:
-                notes.append(f"声纹精修跳过：{str(exc)[:120]}")
-        else:
-            notes.append("声纹精修跳过：声纹模型不可用。")
+    _refine_segments(project, result, cluster_to_role, wanted_embedder, wav_path,
+                     overwrite_manual, notes)
 
-    # Two-engine consensus: cross-check the primary decisions with a complementary
-    # engine; cues the two disagree on are sent back to "pending" for review.
     if consensus:
-        primary = result.get("engine", engine)
-        secondary = diarize.consensus_engine_for(primary)
-        # Consensus needs both engines' clusters in the same voiceprint space.
-        if diarize.embedder_for(primary) != diarize.embedder_for(secondary):
-            notes.append("双引擎共识跳过：两引擎声纹特征空间不同，无法比对。")
-        elif not diarize.engine_available(secondary):
-            notes.append(f"双引擎共识跳过：{secondary} 不可用。")
-        else:
-            if sweep and result.get("sweep_k"):
-                c_min = c_max = int(result["sweep_k"])
-            else:
-                c_min, c_max = max(1, min_speakers), max(1, max_speakers)
-            try:
-                secondary_result = diarize.run(secondary, wav_path, spans, c_min, c_max)
-                secondary_segments = [dict(s) for s in project["segments"]]
-                secondary_segments, _ = aligner.align(
-                    secondary_segments, secondary_result.get("turns", []),
-                    {c: c for c in secondary_result.get("clusters", {})},
-                )
-                secondary_by_id = {s["id"]: s.get("cluster") for s in secondary_segments}
-                b_to_a = aligner.match_clusters(result.get("clusters", {}),
-                                                secondary_result.get("clusters", {}))
-                disagreed = 0
-                for segment in project["segments"]:
-                    if segment.get("speaker_id") is None or segment.get("status") == "manual":
-                        continue
-                    other = secondary_by_id.get(segment["id"])
-                    mapped = None if other is None else b_to_a.get(int(other))
-                    if mapped is None or segment.get("cluster") is None:
-                        continue  # secondary had nothing to say about this cue
-                    if int(segment["cluster"]) != mapped:
-                        segment["speaker_id"] = None
-                        segment["status"] = "pending"
-                        segment["confidence"] = None
-                        segment["note"] = "双引擎不一致，待复核"
-                        disagreed += 1
-                if disagreed:
-                    notes.append(
-                        f"双引擎共识（{primary} × {secondary}）：{disagreed} 条不一致，已标为待定。"
-                    )
-                else:
-                    notes.append(f"双引擎共识（{primary} × {secondary}）：结果一致。")
-            except Exception as exc:
-                notes.append(f"双引擎共识跳过：{str(exc)[:120]}")
+        _apply_consensus(project, result, engine, sweep, min_speakers,
+                         max_speakers, wav_path, spans, notes)
 
     project["cluster_to_role"] = cluster_to_role
-    used_pending = sum(
-        1 for role in project["roles"]
-        if role.get("type") == "pending" and role["id"] in cluster_to_role.values())
-    if pending_created:
-        notes.append(f"创建了 {pending_created} 个待定角色（可在角色管理中命名并入库）。")
-    elif used_pending:
-        notes.append(f"复用了 {used_pending} 个已有的待定角色。")
-    # A later run with fewer clusters must not leave orphaned 待定角色N behind.
+    if unmatched_clusters:
+        notes.append(
+            f"{unmatched_clusters} 个聚类未匹配到已创建的角色，相关字幕保持待定"
+            "（宁可漏、不误判，可人工归属）。"
+        )
+    # Detection no longer invents 待定角色: clear any left by older runs that the
+    # latest mapping does not use (manual-referenced ones are kept).
     pruned = _prune_pending_roles(project, set(cluster_to_role.values()))
     if pruned:
-        notes.append(f"清理了 {pruned} 个不再使用的待定角色。")
+        notes.append(f"清理了 {pruned} 个历史待定角色（未匹配的聚类不再自动生成）。")
     project["detection_notes"] = notes
     return save(project)
 
@@ -622,11 +706,10 @@ def _ensure_pending_role(project: dict, embedder: str = "builtin",
                          assigned: dict | None = None) -> int:
     """Return the id of an unused pending role, creating one when needed.
 
-    ``assigned`` is the in-progress cluster→role map of the current detection
-    run; only roles already handed out *this* run are considered used, so a
-    re-detection reuses the existing pending roles instead of piling up
-    ``待定角色1,2,3…`` on every run. Pending roles get distinct palette colours
-    so several of them stay visually distinguishable while awaiting names.
+    Legacy helper: detection no longer creates "待定角色" (unmatched clusters now
+    keep their cues 待定), but older projects may still hold them, so this stays
+    for reuse/cleanup. ``assigned`` is the in-progress cluster→role map; only
+    roles already handed out *this* run are considered used.
     """
     used = set((assigned or {}).values())
     for role in project["roles"]:
@@ -643,12 +726,11 @@ def _ensure_pending_role(project: dict, embedder: str = "builtin",
 
 
 def _prune_pending_roles(project: dict, keep_ids: set[int]) -> int:
-    """Drop auto "待定" roles the latest detection no longer uses.
+    """Drop auto "待定" roles not referenced by the latest cluster map.
 
-    Re-detection reuses pending roles, so when a later run produces fewer
-    clusters the surplus would linger; this removes it. Pending roles still
-    referenced (by the new cluster map or by a manual assignment) are kept.
-    Returns how many roles were removed.
+    Detection no longer creates pending roles, so this also clears the ones left
+    by older runs. Pending roles still referenced (by the new cluster map or by
+    a manual assignment) are kept. Returns how many roles were removed.
     """
     keep = {int(i) for i in keep_ids}
     for segment in project["segments"]:
@@ -709,8 +791,8 @@ _MEDIA_EXT = set(media._VIDEO_EXTENSIONS) | set(media._AUDIO_EXTENSIONS)
 _SUB_EXT = {".srt", ".vtt", ".ass", ".ssa"}
 
 
-def save_upload(name: str, payload: bytes) -> str:
-    """Persist an uploaded file under data/uploads/ and return its path."""
+def _upload_target(name: str) -> str:
+    """Reserve a safe, unique path under data/uploads/ (no bytes written yet)."""
     _ensure_dirs()
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     base = os.path.basename(name or "file")
@@ -719,6 +801,12 @@ def save_upload(name: str, payload: bytes) -> str:
     if os.path.exists(target):
         stem, ext = os.path.splitext(safe)
         target = os.path.join(UPLOAD_DIR, f"{stem}_{uuid.uuid4().hex[:6]}{ext}")
+    return target
+
+
+def save_upload(name: str, payload: bytes) -> str:
+    """Persist an uploaded file under data/uploads/ and return its path."""
+    target = _upload_target(name)
     with open(target, "wb") as handle:
         handle.write(payload)
     return target
@@ -996,9 +1084,10 @@ def delete_role(project: dict, role_id: int) -> None:
 def delete_pending_roles(project: dict) -> int:
     """Delete every auto-created "待定" role; its cues return to 未归属.
 
-    Detection parks each unmatched cluster in a "待定角色N" role. Once the user
-    has named the ones they care about, the leftovers are noise — this clears
-    them in one go without touching named/registered roles.
+    Older builds parked each unmatched cluster in a "待定角色N" role; current
+    detection leaves unmatched cues 待定 instead, so this is a cleanup path for
+    legacy projects (and for roles created via the roles API). Named/registered
+    roles are never touched.
     """
     pending = {r["id"] for r in project["roles"] if r.get("type") == "pending"}
     _remove_roles(project, pending)
@@ -1043,9 +1132,13 @@ def export(project: dict, formats: list[str], options: dict | None = None) -> li
 
 
 def clean_work_files(project_id: str) -> None:
-    wav = os.path.join(WORK_DIR, f"{project_id}.wav")
-    if os.path.exists(wav):
-        os.remove(wav)
+    for suffix in (".wav", ".peaks.json"):
+        path = os.path.join(WORK_DIR, f"{project_id}{suffix}")
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def delete_project(project_id: str) -> None:

@@ -65,8 +65,10 @@ def main() -> int:
         model.eval()
         try:
             model.to(torch.device(device))
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Do not pretend we are on GPU when the move failed: the note below
+            # reports the model's *actual* device, and the reason is surfaced.
+            notes.append(f"移到 {device} 失败，已在 CPU 上运行：{str(exc)[:120]}")
         segments = model.diarize(audio=[args.wav], batch_size=1)
     except Exception as exc:  # noqa: BLE001
         print(json.dumps({"error": f"Sortformer 推理失败：{exc}"}, ensure_ascii=False))
@@ -74,7 +76,15 @@ def main() -> int:
 
     rows = segments[0] if segments else []
     turns = _normalise(rows)
-    notes.append(f"Sortformer v2.1（{device}），最多同时 4 人。")
+    # Report the device the model actually sits on (NeMo's from_pretrained may
+    # already have placed it on cuda:0, independently of the `device` we picked).
+    actual = str(getattr(model, "device", device))
+    if actual.startswith("cuda"):
+        try:
+            actual = f"{actual} · {torch.cuda.get_device_name(0)}"
+        except Exception:
+            pass
+    notes.append(f"Sortformer v2.1（{actual}），最多同时 4 人。")
     if args.max > 4:
         notes.append("Sortformer 上限 4 人；5 人以上请改用 pyannote community-1 或字幕级声纹聚类。")
     print(json.dumps({"turns": turns, "notes": notes}, ensure_ascii=False))

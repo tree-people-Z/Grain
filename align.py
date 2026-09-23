@@ -39,8 +39,9 @@ def align(
 ) -> tuple[list[dict], list[str]]:
     """Write ``speaker_id`` / ``confidence`` / ``status`` / ``cluster`` on each cue.
 
-    ``cluster_to_role`` maps a diarization cluster id to a role id (already
-    resolved, including auto-created "待定" roles).
+    ``cluster_to_role`` maps a diarization cluster id to a role id. Clusters the
+    matcher could not confidently match to a user-created role are absent from
+    the map, so their cues are left 待定 rather than assigned.
     """
     notes: list[str] = []
     unknown = 0
@@ -108,8 +109,11 @@ def align(
 # Score floor / margin for the voiceprint refinement. A same-speaker cue vs its
 # cluster centroid is usually well above 0.5 cosine in the pyannote space; the
 # margin keeps a confident temporal decision unless the voice clearly disagrees.
-VOICEPRINT_FLOOR = 0.50
-VOICEPRINT_MARGIN = 0.06
+# Set high on purpose: this pass can override the timing vote, so a weak cue
+# voiceprint must not be allowed to move it to the wrong known speaker. A missed
+# correction just stays 待定 for review.
+VOICEPRINT_FLOOR = 0.58
+VOICEPRINT_MARGIN = 0.08
 
 
 def refine_with_voiceprints(

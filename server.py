@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import mimetypes
 import os
 import re
@@ -22,6 +21,7 @@ import apppaths
 import audio_features as af
 import dataset_export
 import diarize
+import jsonutil
 import media
 import project as store
 import roles as rolelib
@@ -39,6 +39,9 @@ MEDIA_MIME = {
 }
 
 
+MAX_UPLOAD_BYTES = int(os.environ.get("SSP_MAX_UPLOAD_MB", "4096")) * 1024 * 1024
+
+
 def _within(path: str, root: str) -> bool:
     """True when ``path`` is inside ``root`` (not merely sharing a name prefix)."""
     try:
@@ -47,22 +50,6 @@ def _within(path: str, root: str) -> bool:
         ) == os.path.abspath(root)
     except ValueError:
         return False
-
-
-def _json_safe(value):
-    """Replace NaN/Infinity with null so ``json.dumps`` stays valid JSON.
-
-    A single NaN confidence (e.g. from a bad embedder crop) otherwise emits a
-    bare ``NaN`` token that breaks the browser's ``JSON.parse`` and takes the
-    whole project load down with it.
-    """
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, dict):
-        return {key: _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    return value
 
 
 # --- client-facing views ----------------------------------------------------
@@ -154,28 +141,20 @@ def state_payload() -> dict:
 
 def peaks_for(project: dict, buckets: int = 1200) -> list[float]:
     cache = os.path.join(store.WORK_DIR, f"{project['id']}.peaks.json")
-    if os.path.exists(cache):
-        try:
-            with open(cache, "r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-            if payload.get("buckets") == buckets:
-                return payload["peaks"]
-        except Exception:
-            pass
+    try:
+        payload = store._read_json(cache, {})
+        if payload.get("buckets") == buckets:
+            return payload["peaks"]
+    except Exception:
+        pass
     wav_path = store.work_wav(project)
-    signal, rate = af.read_wav(wav_path, media.AUDIO_SAMPLE_RATE)
-    if not signal or buckets <= 0:
-        return []
-    size = max(1, math.ceil(len(signal) / buckets))
-    peaks = []
-    for index in range(0, len(signal), size):
-        window = signal[index:index + size]
-        peaks.append(round(max(abs(v) for v in window), 4))
-    ceiling = max(peaks) if peaks else 1.0
-    if ceiling > 0:
-        peaks = [round(min(1.0, p / ceiling), 4) for p in peaks]
-    with open(cache, "w", encoding="utf-8") as handle:
-        json.dump({"buckets": buckets, "peaks": peaks}, handle)
+    signal, _rate = af.read_wav(wav_path, media.AUDIO_SAMPLE_RATE)
+    peaks = af.waveform_peaks(signal, buckets)
+    try:
+        # Atomic: a concurrent GET must never read a half-written peaks file.
+        store._write_json(cache, {"buckets": buckets, "peaks": peaks})
+    except OSError:
+        pass
     return peaks
 
 
@@ -219,7 +198,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _json(self, payload, status: int = 200) -> None:
-        body = json.dumps(_json_safe(payload), ensure_ascii=False).encode("utf-8")
+        body = json.dumps(jsonutil.json_safe(payload), ensure_ascii=False).encode("utf-8")
         self._send(status, body, "application/json; charset=utf-8")
 
     def _error(self, message: str, status: int = 400) -> None:
@@ -300,6 +279,31 @@ class Handler(BaseHTTPRequestHandler):
 
     do_HEAD = do_GET
 
+    def _receive_upload(self, name: str, length: int) -> str:
+        """Stream the request body to an upload file in 1 MB chunks.
+
+        The old code did ``rfile.read(length)`` into memory first, so dropping a
+        multi-GB video on the window could OOM the server. Chunking keeps peak
+        memory at the buffer size regardless of file size.
+        """
+        target = store._upload_target(name)
+        remaining = length
+        try:
+            with open(target, "wb") as handle:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ConnectionError("upload interrupted")
+                    handle.write(chunk)
+                    remaining -= len(chunk)
+        except BaseException:
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+            raise
+        return target
+
     def do_PUT(self):
         """Raw file upload: PUT /api/upload?name=<urlencoded filename>."""
         parsed = urllib.parse.urlparse(self.path)
@@ -311,8 +315,10 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
             if not length:
                 return self._error("空的上传内容", 400)
-            payload = self.rfile.read(length)
-            path = store.save_upload(name, payload)
+            if length > MAX_UPLOAD_BYTES:
+                return self._error(
+                    f"文件超过上限 {MAX_UPLOAD_BYTES // (1024 * 1024)} MB", 413)
+            path = self._receive_upload(name, length)
             return self._json({"ok": True, "path": path,
                                "kind": store.classify_file(path)})
         except ConnectionError:
@@ -416,7 +422,7 @@ class Handler(BaseHTTPRequestHandler):
             stem = payload.get("name") or os.path.splitext(os.path.basename(media_path))[0]
             target_dir = os.path.join(store.DATA_DIR, "asr")
             os.makedirs(target_dir, exist_ok=True)
-            srt_path = os.path.join(target_dir, f"{store._slug(stem)}.srt")
+            srt_path = os.path.join(target_dir, f"{store.slug(stem)}.srt")
             with open(srt_path, "w", encoding="utf-8") as handle:
                 handle.write(sio.write_srt(segments, {}))
             return self._json({
