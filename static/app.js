@@ -2653,7 +2653,8 @@ function openSettings() {
         ${group("引擎可用性", engineRows)}
         ${group("维护",
           row("数据目录", `<span class="mono">${escapeHtml(cfg.data_dir || "")}</span>`, "") +
-          row("临时文件", "清理解码缓存 WAV 与波形缓存", `<button class="btn sm" id="set-clean">清理</button>`))}
+          row("临时文件", "清理解码缓存 WAV 与波形缓存", `<button class="btn sm" id="set-clean">清理</button>`) +
+          row("上传文件", "删除已无项目引用的上传媒体 / 字幕副本", `<button class="btn sm" id="set-clean-uploads">清理</button>`))}
         <p class="hint">ffmpeg：${state.meta?.ffmpeg ? "已找到 ✓" : "未找到 ✗（影响解码与导出）"}</p>
       `;
       content.querySelector("#set-token-save").addEventListener("click", async () => {
@@ -2666,6 +2667,12 @@ function openSettings() {
         try {
           const data = await API.post("/api/maintenance", { action: "clean_work" });
           setMessage(`已清理 ${data.removed} 个临时文件`, "ok");
+        } catch (err) { setMessage(err.message); }
+      });
+      content.querySelector("#set-clean-uploads").addEventListener("click", async () => {
+        try {
+          const data = await API.post("/api/maintenance", { action: "clean_uploads" });
+          setMessage(`已清理 ${data.removed} 个未使用的上传文件`, "ok");
         } catch (err) { setMessage(err.message); }
       });
     },
@@ -2908,12 +2915,18 @@ function openProjectList() {
     });
     body.querySelectorAll("button[data-del]").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        if (!window.confirm("删除该项目（含导出文件）？")) return;
-        await API.del(`/api/projects/${btn.dataset.del}`);
-        await refreshMeta();
-        if (state.projectId === btn.dataset.del) resetWorkspace();
-        close();
-        openProjectList();
+        if (!window.confirm("删除该项目？会一并删除它的导出文件与已上传的媒体/字幕副本（你自己路径下的原文件不动）。")) return;
+        try {
+          const data = await API.del(`/api/projects/${btn.dataset.del}`);
+          await refreshMeta();
+          if (state.projectId === btn.dataset.del) resetWorkspace();
+          close();
+          const n = data.removed_uploads || 0;
+          setMessage(`已删除项目${n ? `，并清理 ${n} 个上传文件` : ""}`, "ok");
+          openProjectList();
+        } catch (err) {
+          setMessage(err.message);
+        }
       });
     });
   });

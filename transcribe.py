@@ -8,6 +8,11 @@ the user requests transcription, so the tool stays fully usable without it.
 
 from __future__ import annotations
 
+import apppaths
+
+# Use the package's bundled HuggingFace cache when present (offline ASR).
+apppaths.configure_model_caches()
+
 
 def availability() -> dict:
     try:

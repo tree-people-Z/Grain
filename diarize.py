@@ -38,6 +38,11 @@ import media
 # unguarded cache could run a model load twice or hand out a half-built entry.
 _CACHE_LOCK = threading.RLock()
 
+# Point HuggingFace / ModelScope at the package's bundled model cache (if any)
+# before torch / pyannote / funasr are imported, so a portable build loads the
+# weights offline instead of reaching for the user's ~/.cache or the network.
+apppaths.configure_model_caches()
+
 MIN_TURN_SECONDS = 0.30
 
 ENGINE_ALIASES = {"3dspeaker": "campp", "funasr": "campp", "nemo": "nemo",

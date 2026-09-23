@@ -8,8 +8,21 @@ import shutil
 import subprocess
 import tempfile
 
-FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
-FFPROBE = shutil.which("ffprobe") or "ffprobe"
+import apppaths
+
+
+def _find_tool(name: str) -> str:
+    """Prefer a bundled ``runtime/ffmpeg/bin`` copy, then PATH."""
+    directory = apppaths.bundled_ffmpeg_dir()
+    if directory:
+        exe = os.path.join(directory, name + (".exe" if os.name == "nt" else ""))
+        if os.path.isfile(exe):
+            return exe
+    return shutil.which(name) or name
+
+
+FFMPEG = _find_tool("ffmpeg")
+FFPROBE = _find_tool("ffprobe")
 
 AUDIO_SAMPLE_RATE = 16000
 _AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma"}

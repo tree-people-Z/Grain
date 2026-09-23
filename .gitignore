@@ -20,6 +20,10 @@ env/
 build/
 dist/
 
+# --- 内置资源（整合包）：ffmpeg 与模型，体积大，勿提交 ---
+runtime/
+models/
+
 # --- 日志 / 临时文件 ---
 *.log
 *.tmp

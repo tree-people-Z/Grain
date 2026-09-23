@@ -1141,9 +1141,83 @@ def clean_work_files(project_id: str) -> None:
                 pass
 
 
-def delete_project(project_id: str) -> None:
+def _owned_upload(path: str | None) -> bool:
+    """True when ``path`` is a file the app copied into ``data/uploads/``.
+
+    Only app-owned copies are ever deleted: a path the user typed (their own
+    video/subtitle elsewhere on disk) must never be removed by a project action.
+    """
+    if not path:
+        return False
+    try:
+        return os.path.commonpath(
+            [os.path.abspath(path), os.path.abspath(UPLOAD_DIR)]
+        ) == os.path.abspath(UPLOAD_DIR)
+    except ValueError:
+        return False
+
+
+def _remove_owned_uploads(project: dict) -> int:
+    """Delete this project's imported media/subtitle copies; returns the count."""
+    removed = 0
+    for key in ("media_path", "subtitle_path", "second_subtitle_path"):
+        path = project.get(key)
+        if path and _owned_upload(path) and os.path.isfile(path):
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def delete_project(project_id: str) -> int:
+    """Delete a project and everything it owns (uploads, exports, work files).
+
+    Returns how many uploaded media/subtitle copies were removed. Files the user
+    referenced from elsewhere on disk are left alone.
+    """
+    removed_uploads = 0
+    try:
+        removed_uploads = _remove_owned_uploads(load(project_id))
+    except Exception:
+        pass
     path = project_path(project_id)
     if os.path.exists(path):
         os.remove(path)
     shutil.rmtree(os.path.join(EXPORT_DIR, project_id), ignore_errors=True)
     clean_work_files(project_id)
+    return removed_uploads
+
+
+def clean_orphan_uploads() -> int:
+    """Delete uploaded files no project references any more; returns the count.
+
+    Uploads survive a project that was removed without cleaning up (older builds)
+    or an import that failed after the files were copied in; this reclaims them.
+    """
+    _ensure_dirs()
+    if not os.path.isdir(UPLOAD_DIR):
+        return 0
+    referenced: set[str] = set()
+    for filename in os.listdir(PROJECT_DIR):
+        if not filename.endswith(".json"):
+            continue
+        try:
+            project = load(filename[:-5])
+        except Exception:
+            continue
+        for key in ("media_path", "subtitle_path", "second_subtitle_path"):
+            value = project.get(key)
+            if value:
+                referenced.add(os.path.abspath(value))
+    removed = 0
+    for name in os.listdir(UPLOAD_DIR):
+        full = os.path.join(UPLOAD_DIR, name)
+        if os.path.isfile(full) and os.path.abspath(full) not in referenced:
+            try:
+                os.remove(full)
+                removed += 1
+            except OSError:
+                pass
+    return removed

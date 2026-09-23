@@ -359,8 +359,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             match = re.fullmatch(r"/api/projects/([\w.-]+)", path)
             if match:
-                store.delete_project(match.group(1))
-                return self._json({"ok": True})
+                removed = store.delete_project(match.group(1))
+                return self._json({"ok": True, "removed_uploads": removed})
             match = re.fullmatch(r"/api/projects/([\w.-]+)/roles/(\d+)", path)
             if match:
                 project = store.load(match.group(1))
@@ -436,7 +436,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "settings": store.save_settings(payload)})
 
         if path == "/api/maintenance":
-            if payload.get("action") == "clean_work":
+            action = payload.get("action")
+            if action == "clean_work":
                 removed = 0
                 for name in os.listdir(store.WORK_DIR):
                     try:
@@ -445,6 +446,8 @@ class Handler(BaseHTTPRequestHandler):
                     except OSError:
                         pass
                 return self._json({"ok": True, "removed": removed})
+            if action == "clean_uploads":
+                return self._json({"ok": True, "removed": store.clean_orphan_uploads()})
             return self._error("未知维护操作", 400)
 
         match = re.fullmatch(r"/api/projects/([\w.-]+)/(\w[\w-]*)", path)

@@ -15,10 +15,11 @@
 
 ## 环境要求
 
-- Python **3.10+**（开发与打包使用 3.13）。
+- Python **3.10+**（开发使用 3.13）。
 - 基础功能（导入 / 复核 / 导出）**零第三方依赖**。
-- `ffmpeg` 必须在 `PATH`（解码音频、生成波形）。
-- 自动检测需 `torch` 及各引擎依赖；桌面壳需 `pywebview`。
+- `ffmpeg`：**整合包已内置** `runtime\ffmpeg\bin\`，无需装；缺失时才回退 `PATH`。
+- 自动检测需 `torch` 及各引擎依赖（`pip install -r requirements.txt`）；桌面壳需 `pywebview`。
+- 模型：**整合包已内置** `models\`，离线可用；缺失时才回退用户缓存 / 联网下载。
 
 ## 快速开始
 
@@ -214,62 +215,43 @@ tests/               e2e.py · test_bilingual.py · test_ass_filter.py · test_d
 sample/              测试样例（interview.* 与双语样例）
 data/                运行时数据：projects/ exports/ work/ uploads/、settings.json、role_library.json、hf_token.txt（勿提交）
 
-# 构建与配置
-Grain.spec           PyInstaller 打包配置（基础版桌面应用）
-installer.iss        Inno Setup 安装包脚本 · installer/ChineseSimplified.isl 中文语言文件
+# 内置资源（整合包，.bat 启动，可整目录拷贝；体积大，未提交 git）
+runtime/ffmpeg/bin/  ffmpeg.exe · ffprobe.exe（media.py 优先用这里，找不到才用 PATH）
+models/hf/hub/       HuggingFace 缓存（pyannote、Sortformer），离线加载
+models/modelscope/   ModelScope 缓存（CAM++ / FunASR），离线加载
+
+# 启动与配置
 启动网页版.bat · 启动桌面版.bat · 启动桌面版-开发.bat
+scripts/setup_engine.py  安装 Sortformer 隔离环境（需要时）
 requirements.txt · README.md · .gitignore
 ```
 
-## 桌面版打包（pywebview + PyInstaller，推荐）
+## 整合包（离线，`.bat` 启动）
+
+不做 exe 打包。整个文件夹就是整合包，双击对应 `.bat` 即可，**无需联网下载 ffmpeg 或模型**：
 
 ```bat
-pip install pywebview pyinstaller
-python -m PyInstaller --noconfirm --clean Grain.spec
+启动桌面版.bat        REM 原生窗口（需 pip install pywebview）
+启动网页版.bat        REM 浏览器打开 http://127.0.0.1:8770（无桌面依赖）
+启动桌面版-开发.bat    REM 开发模式：改代码自动重载
 ```
 
-产物：`dist\Grain\Grain.exe`（要和 `_internal\` 整个目录一起分发，别只拷 exe）。首次运行会在 exe 同目录生成 `data\`。
+离线资源由代码自动发现，**不需要任何环境变量**：
 
-要点：
+- `media.py` 优先使用 `runtime\ffmpeg\bin\ffmpeg.exe` / `ffprobe.exe`，找不到才回退系统 `PATH`；
+- `diarize.py` / `transcribe.py` 启动时调用 `apppaths.configure_model_caches()`，把 HuggingFace / ModelScope 的缓存指向 `models\`（已实测 `HF_HUB_OFFLINE=1` 下 pyannote community-1 可从内置缓存加载）。
 
-- `Grain.spec` 打的是**基础版**：导入 / 复核 / 导出 + 内置特征声纹 + 纯手动。**不含** torch / pyannote / funasr：本机装了 torch 就有约 4GB，而且模型权重是运行时才下载的，打进 exe 没有意义。`diarize.py` / `transcribe.py` 对重依赖都是函数内延迟导入，缺失时对应引擎在界面显示“不可用”，不影响其它功能。
-- 需要重型引擎：在 exe 同目录放一个 `engines\`，用其独立环境跑 `python scripts\setup_engine.py sortformer`（打包版不含 `scripts/`，从源码仓库复制即可）。
+把整个文件夹（含 `runtime\`、`models\`、`engines\`、`data\`）拷到另一台机器，只要那台机器有 Python 3.10+ 与 `requirements.txt` 里的依赖（`pip install -r requirements.txt`，torch 选 CPU 或 CUDA 版皆可），双击 `.bat` 就能离线跑全部引擎。
+
+- **重装依赖**：`pip install -r requirements.txt` + `pip install pywebview`（桌面版）。
+- **Sortformer**：`engines\sortformer\` 用的是隔离环境（NeMo 与主程序 torch 不兼容）。若该目录里没有 `.venv`，跑一次 `python scripts\setup_engine.py sortformer` 重建（模型权重已在 `models\`，不会再下载）。
+- **新增/更换模型**：直接放进 `models\hf\hub\` 或 `models\modelscope\`，或删掉 `models\` 让它回退到用户默认缓存/联网下载。
 - 无边框窗口（frameless）没有原生标题栏；最小化 / 最大化 / 关闭是导航栏右端的自绘按钮，拖动窗口用导航栏空白处。
-- 打包版的后端不再执行 `server.py`，而是把同一个 exe 以 `--backend` 再起一份（`desktop_pywebview.spawn_server` 里的 `sys.frozen` 分支），所以 exe 不用带 `server.py` 文件。
-- 运行环境需系统 WebView2（Windows 10/11 通常自带）。
-
-## 生成安装包（Inno Setup）
-
-```bat
-pip install pyinstaller pywebview
-python -m PyInstaller --noconfirm --clean Grain.spec
-ISCC installer.iss
-```
-
-产物：`dist\installer\Grain-Setup-1.0.0.exe`（约 22 MB）。
-
-- 纯**用户级安装**（`PrivilegesRequired=lowest`），装到 `%LOCALAPPDATA%\Programs\Grain`，**不需要管理员**。程序会在 exe 同目录写 `data\`（项目/导出/声纹库），所以刻意避开 `Program Files`。
-- 安装界面含简体中文（`installer\ChineseSimplified.isl` 随仓库提供）与英文；建开始菜单快捷方式，桌面图标可选，自带卸载程序。
-- 卸载**不删除** `data\` 里的项目与导出，避免误删用户数据。
-- 没装 Inno Setup 时可免管理员便携安装官方版：
-  `innosetup-6.7.3.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR=%LOCALAPPDATA%\Programs\InnoSetup6`，
-  再用该目录下的 `ISCC.exe` 编译。
 
 ## 测试
 
-纯 Python、无 torch 的单元测试可直接跑（无需 ffmpeg / 模型）：
+仓库为「只留运行要用的」已移除 `tests\`、`sample\`、`make_sample.py`。如需回归，从 git 历史取回：
 
 ```bat
-python tests/test_library.py           REM 全局角色库 upsert / 整理重名，13 项断言
-python tests/test_enroll.py            REM 声纹录入均值 / 上限 / 溢出保护，12 项断言
-python tests/test_detection_utils.py   REM 人数扫描 / 静音裁剪 / 声纹阈值 / 自动登记，30 项断言
-python tests/test_bilingual.py         REM 双语解析 / 合并 / 导出，22 项断言
-python tests/test_ass_filter.py        REM ASS 只导入对白（跳过特效/标题/卡拉OK），18 项断言
-```
-
-端到端（会真正起服务、需要 ffmpeg）：
-
-```bat
-python make_sample.py    REM 生成 sample/interview.{wav,mp4,srt}（说话人顺序 A B A B A B）
-python tests/e2e.py      REM 全流程，43 项断言
+git checkout HEAD~1 -- tests sample make_sample.py
 ```
