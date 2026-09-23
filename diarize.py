@@ -48,20 +48,78 @@ MIN_TURN_SECONDS = 0.30
 ENGINE_ALIASES = {"3dspeaker": "campp", "funasr": "campp", "nemo": "nemo",
                   "wespeaker": "voiceprint-cue"}
 
+# Engines that have no embedder of their own and are enriched with the active
+# voiceprint model (below): pyannote's turns, the cue/voiceprint engine, and the
+# external engines all share one feature space so their voiceprints interchange.
+_VOICEPRINT_ENGINES = {"pyannote", "voiceprint-cue", "sortformer", "diarizen"}
+
+# Selectable speaker-embedding models for the pyannote family. Each profile is a
+# *distinct feature space*: vectors from different models are never compared, so
+# a role enrolled under one shows "需重录" under another. "wespeaker" keeps the
+# historical space id "pyannote" so existing projects/roles stay valid.
+VOICEPRINT_PROFILES: dict[str, dict] = {
+    "wespeaker": {
+        "label": "pyannote wespeaker（默认）",
+        "space": "pyannote",
+        "kind": "pyannote",
+        "repos": ("pyannote/wespeaker-voxceleb-resnet34-LM", "pyannote/embedding"),
+        "detail": "pyannote 官方管线的声纹模型，通用稳妥；与 community-1 聚类同源。",
+    },
+    "eres2netv2": {
+        "label": "3D-Speaker ERes2NetV2（短句更强）",
+        "space": "eres2netv2",
+        "kind": "funasr",
+        "model": "iic/speech_eres2netv2_sv_zh-cn_16k-common",
+        "detail": ("阿里 3D-Speaker 的 ERes2NetV2，短字幕、噪声下比 CAM++/ECAPA 更稳；"
+                   "模型从 ModelScope 下载，无需 token。与默认 wespeaker 特征空间不通用，"
+                   "切换后需用新模型重新录入声纹。"),
+    },
+}
+
+_VOICEPRINT_MODEL = "wespeaker"
+
+
+def set_voiceprint_model(key: str) -> None:
+    """Select the active speaker-embedding profile (affects feature-space tags)."""
+    global _VOICEPRINT_MODEL
+    key = key if key in VOICEPRINT_PROFILES else "wespeaker"
+    if key == _VOICEPRINT_MODEL:
+        return
+    _VOICEPRINT_MODEL = key
+    # Cached embedders and the client-facing space map are now stale.
+    global _AVAILABILITY_CACHE
+    _AVAILABILITY_CACHE = None
+    with _CACHE_LOCK:
+        _PYANNOTE_EMBEDDER_CACHE.clear()
+
+
+def active_voiceprint_model() -> str:
+    return _VOICEPRINT_MODEL
+
+
+def voiceprint_profiles() -> list[dict]:
+    """Profiles for the settings UI, each tagged with availability."""
+    out = []
+    for key, meta in VOICEPRINT_PROFILES.items():
+        if meta["kind"] == "funasr":
+            available = _try_import("funasr")[0] and _try_import("modelscope")[0]
+        elif meta["kind"] == "pyannote":
+            available = _try_import("pyannote.audio")[0]
+        else:
+            available = True
+        out.append({"key": key, "label": meta["label"], "space": meta["space"],
+                    "detail": meta.get("detail", ""), "available": available})
+    return out
+
 
 def embedder_for(engine: str) -> str:
     """Which voiceprint feature space an engine's clusters live in."""
     engine = ENGINE_ALIASES.get(engine, engine)
-    return {
-        "pyannote": "pyannote",
-        "campp": "campp",
-        # The cue/voiceprint engines embed with the same model the pipeline uses,
-        # so their voiceprints are interchangeable with the pyannote space.
-        "voiceprint-cue": "pyannote",
-        # External engines have no embedder of their own; turns are enriched with
-        # wespeaker voiceprints so enrolment/matching still works.
-        "sortformer": "pyannote",
-    }.get(engine, "builtin")
+    if engine in _VOICEPRINT_ENGINES:
+        return VOICEPRINT_PROFILES[_VOICEPRINT_MODEL]["space"]
+    if engine == "campp":
+        return "campp"
+    return "builtin"
 
 
 # --- availability -----------------------------------------------------------
@@ -99,12 +157,13 @@ def warm_engines() -> None:
 def _pyannote_detail(ok: bool, err: str) -> str:
     if not ok:
         return f"未安装：{err}。安装：pip install torch pyannote.audio"
-    token = _pyannote_token()
-    token_note = (
-        "已检测到 HuggingFace token"
-        if token else
-        "未检测到 token：放到环境变量 HF_TOKEN，或写入 data/hf_token.txt"
-    )
+    if apppaths.bundled_hf_hub_cache():
+        # The gated weights ship with the package, so no token is required.
+        token_note = "已内置模型，无需 HuggingFace token"
+    elif _pyannote_token():
+        token_note = "已检测到 HuggingFace token"
+    else:
+        token_note = "未检测到 token：放到环境变量 HF_TOKEN，或写入 data/hf_token.txt"
     gated = "、".join(PYANNOTE_GATED_REPOS)
     return (
         "精度最高的通用方案，默认用 pyannote.audio 4 的 community-1（失败回退 3.1），"
@@ -282,10 +341,14 @@ def _voiceprint_cue_turns(wav_path: str, spans: list[tuple[float, float]],
     signal, rate = _load_signal(wav_path)
     if not signal:
         raise RuntimeError("音频为空，无法进行说话人检测。")
-    embedder = _make_pyannote_embedder(wav_path, signal)
+    # Use the active voiceprint profile so the cue engine's space matches
+    # embedder_for("voiceprint-cue") — otherwise clusters and enrolled voiceprints
+    # would live in different models but be tagged as the same space.
+    embedder = make_embedder("voiceprint-cue", wav_path, signal)
     if embedder is None:
         raise RuntimeError(
-            "pyannote 声纹模型加载失败（需要 torch + pyannote.audio，首次会下载 wespeaker 权重）。"
+            "声纹模型加载失败（检查已安装 torch + pyannote.audio / funasr，"
+            "或改用默认 wespeaker 声纹模型）。"
         )
     turns = []
     short = 0
@@ -724,7 +787,8 @@ PYANNOTE_EMBEDDING_REPOS = (
 )
 
 
-def _make_pyannote_embedder(wav_path: str, signal: list[float] | None = None):
+def _make_pyannote_embedder(wav_path: str, signal: list[float] | None = None,
+                            repos: tuple[str, ...] | None = None):
     """``f(start, end) -> vector`` in the pyannote feature space, or None.
 
     pyannote >= 4 removed the ``Inference("repo/id")`` shortcut: the first
@@ -739,8 +803,10 @@ def _make_pyannote_embedder(wav_path: str, signal: list[float] | None = None):
     extractor, so both sides stay in the same distribution, and a speaker-count
     sweep over the same spans only pays for the crops once.
     """
+    repos = repos or PYANNOTE_EMBEDDING_REPOS
+    cache_key = (wav_path, repos[0])
     with _CACHE_LOCK:
-        cached = _PYANNOTE_EMBEDDER_CACHE.get(wav_path)
+        cached = _PYANNOTE_EMBEDDER_CACHE.get(cache_key)
     if cached is not None:
         return cached["extract"]
     try:
@@ -753,7 +819,7 @@ def _make_pyannote_embedder(wav_path: str, signal: list[float] | None = None):
 
     token = _pyannote_token()
     model = None
-    for repo in PYANNOTE_EMBEDDING_REPOS:
+    for repo in repos:
         try:
             model = Model.from_pretrained(repo, token=token)
             break
@@ -809,11 +875,59 @@ def _make_pyannote_embedder(wav_path: str, signal: list[float] | None = None):
             return vector
 
         with _CACHE_LOCK:
-            _PYANNOTE_EMBEDDER_CACHE[wav_path] = {"extract": extract, "vectors": vectors}
+            _PYANNOTE_EMBEDDER_CACHE[cache_key] = {"extract": extract, "vectors": vectors}
             # Each cached entry pins an Inference model (hundreds of MB) plus
             # every crop vector; keep only the most recent couple of files.
             while len(_PYANNOTE_EMBEDDER_CACHE) > 2:
                 _PYANNOTE_EMBEDDER_CACHE.pop(next(iter(_PYANNOTE_EMBEDDER_CACHE)))
+        return extract
+    except Exception:
+        return None
+
+
+def _make_funasr_embedder(model_id: str, wav_path: str, signal=None):
+    """``f(start, end) -> vector`` from a FunASR/ModelScope speaker model.
+
+    Used for CAM++ and ERes2NetV2. Slices the already-decoded signal in memory
+    (one reused temp WAV) so a per-cue ``ffmpeg`` spawn never dominates.
+    """
+    try:
+        from funasr import AutoModel
+
+        model = AutoModel(model=model_id, device=_funasr_device())
+        if signal is None:
+            signal, rate = _load_signal(wav_path)
+        else:
+            rate = media.AUDIO_SAMPLE_RATE
+
+        def extract(start: float, end: float) -> list[float]:
+            import tempfile
+
+            temp_path = getattr(extract, "_temp_path", None)
+            if temp_path is None:
+                handle, temp_path = tempfile.mkstemp(suffix=".wav")
+                import os as _os
+                _os.close(handle)
+                extract._temp_path = temp_path
+            _write_wav_slice(signal, rate, start, end, temp_path)
+            result = model.generate(input=temp_path)
+            for item in result or []:
+                vector = item.get("spk_embedding")
+                if vector is None:
+                    vector = item.get("embedding")
+                if vector is None:
+                    continue
+                # funasr returns a tensor; may carry a batch dim.
+                if hasattr(vector, "detach"):
+                    vector = vector.detach().cpu()
+                if hasattr(vector, "numpy"):
+                    import numpy as _np
+                    vector = _np.asarray(vector).reshape(-1)
+                values = [float(v) for v in list(vector)]
+                if af.is_finite_vector(values):
+                    return values
+            return []
+
         return extract
     except Exception:
         return None
@@ -827,53 +941,19 @@ def make_embedder(engine: str, wav_path: str, signal=None):
     """
     engine = ENGINE_ALIASES.get(engine, engine)
 
-    if engine in ("pyannote", "voiceprint-cue"):
-        # Same feature space (see embedder_for), so the same extractor: a
-        # voiceprint enrolled under either engine stays valid for the other.
-        return _make_pyannote_embedder(wav_path, signal)
+    if engine in _VOICEPRINT_ENGINES:
+        # pyannote's own turns, the cue engine and the external engines all share
+        # the active voiceprint profile's feature space (see embedder_for).
+        profile = VOICEPRINT_PROFILES[_VOICEPRINT_MODEL]
+        if profile["kind"] == "pyannote":
+            return _make_pyannote_embedder(wav_path, signal, repos=profile["repos"])
+        if profile["kind"] == "funasr":
+            return _make_funasr_embedder(profile["model"], wav_path, signal)
+        return None
 
     if engine == "campp":
-        try:
-            from funasr import AutoModel
-
-            model = AutoModel(model="iic/speech_campplus_sv_zh-cn_16k-common",
-                              device=_funasr_device())
-            if signal is None:
-                signal, rate = _load_signal(wav_path)
-            else:
-                rate = media.AUDIO_SAMPLE_RATE
-
-            def extract(start: float, end: float) -> list[float]:
-                import tempfile
-
-                # One temp WAV reused for every cue: slicing the in-memory signal
-                # with stdlib `wave` avoids an ffmpeg process launch per turn.
-                temp_path = getattr(extract, "_temp_path", None)
-                if temp_path is None:
-                    handle, temp_path = tempfile.mkstemp(suffix=".wav")
-                    import os as _os
-                    _os.close(handle)
-                    extract._temp_path = temp_path
-                _write_wav_slice(signal, rate, start, end, temp_path)
-                result = model.generate(input=temp_path)
-                for item in result or []:
-                    vector = item.get("spk_embedding")
-                    if vector is None:
-                        continue
-                    # funasr returns a tensor; may carry a batch dim.
-                    if hasattr(vector, "detach"):
-                        vector = vector.detach().cpu()
-                    if hasattr(vector, "numpy"):
-                        import numpy as _np
-                        vector = _np.asarray(vector).reshape(-1)
-                    values = [float(v) for v in list(vector)]
-                    if af.is_finite_vector(values):
-                        return values
-                return []
-
-            return extract
-        except Exception:
-            return None
+        return _make_funasr_embedder("iic/speech_campplus_sv_zh-cn_16k-common",
+                                     wav_path, signal)
 
     # builtin feature space
     if signal is None:

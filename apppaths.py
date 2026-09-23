@@ -71,12 +71,30 @@ def bundled_modelscope_cache() -> str | None:
     ])
 
 
+def hf_token_configured() -> bool:
+    """True when an HF token is available (env var or ``data/hf_token.txt``)."""
+    if os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN"):
+        return True
+    token_file = os.path.join(data_dir(), "hf_token.txt")
+    try:
+        with open(token_file, "r", encoding="utf-8-sig") as handle:
+            return bool(handle.read().strip())
+    except OSError:
+        return False
+
+
 def configure_model_caches() -> None:
     """Point HF / ModelScope at the bundled caches so engines load offline.
 
     Only sets a variable when the user has not already overridden it and the
     bundled directory actually exists, so a normal source checkout (no bundled
     models) keeps using the default per-user cache untouched.
+
+    When the bundled weights are present and no token is configured, HF is put
+    in offline mode: the gated pyannote models then load straight from the
+    bundled cache without ever contacting the Hub (and therefore without a
+    token or accepting the gate). A configured token leaves it online so new
+    models can still be fetched.
     """
     hf_hub = bundled_hf_hub_cache()
     if hf_hub and not (os.environ.get("HF_HUB_CACHE")
@@ -86,3 +104,6 @@ def configure_model_caches() -> None:
     ms = bundled_modelscope_cache()
     if ms and not os.environ.get("MODELSCOPE_CACHE"):
         os.environ["MODELSCOPE_CACHE"] = ms
+    if hf_hub and not hf_token_configured():
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")

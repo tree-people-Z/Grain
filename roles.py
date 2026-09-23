@@ -122,6 +122,10 @@ def enroll(role: dict, wav_path: str, start: float, end: float, source: str = ""
 EMBEDDER_MATCH = {
     "pyannote": (0.66, 0.07),
     "campp": (0.76, 0.06),
+    # ERes2NetV2 (3D-Speaker) large-margin space. Not yet calibrated against a
+    # labelled set here, so it starts deliberately strict (a miss just stays
+    # 待定; a wrong match poisons the set). Tune down if it under-matches.
+    "eres2netv2": (0.68, 0.08),
     "builtin": (0.84, 0.006),
 }
 

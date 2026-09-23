@@ -2235,6 +2235,7 @@ function openDetectModal() {
         <div class="adv-body">
           <label class="check"><input type="checkbox" id="d-sweep"${defaultEngine === "voiceprint-cue" ? " checked" : ""}> 人数自动扫描（在上、下限之间逐个试，取分离度最优）</label>
           <label class="check"><input type="checkbox" id="d-consensus"> 双引擎共识（<b>只增加待定、不纠错</b>；仅两引擎都强时做质检）</label>
+          <label class="check"><input type="checkbox" id="d-separate"${cfg.separate_vocals ? " checked" : ""}> 人声分离（先用 Demucs 剥离 BGM/伴奏再检测；更准但更慢）</label>
           <label class="check"><input type="checkbox" id="d-overwrite"> 覆盖已人工复核的归属</label>
           <p class="hint" id="d-extra-note"></p>
           <p class="hint">声纹匹配阈值默认按引擎自动校准，可在「设置 → 检测」里调整。</p>
@@ -2266,7 +2267,7 @@ function openDetectModal() {
 
     const dev = state.meta.device || {};
     const devNode = body.querySelector("#d-device");
-    const gpuEngines = new Set(["campp", "pyannote", "voiceprint-cue", "sortformer"]);
+    const gpuEngines = new Set(["campp", "pyannote", "voiceprint-cue", "sortformer", "diarizen"]);
     const renderDevice = () => {
       const usesGpu = gpuEngines.has(select.value);
       if (!usesGpu) {
@@ -2295,6 +2296,9 @@ function openDetectModal() {
       if (body.querySelector("#d-consensus").checked) {
         parts.push("共识只把两引擎不一致的句子标为待定（不纠错），耗时≈两次。");
       }
+      if (body.querySelector("#d-separate").checked) {
+        parts.push("人声分离首次会对整段音频跑一遍 Demucs（CPU 可能较久），结果会缓存。");
+      }
       extra.textContent = parts.join(" ");
     };
     // Sweep defaults on only for the voiceprint-cue engine (its clustering is the
@@ -2304,6 +2308,7 @@ function openDetectModal() {
     let sweepTouched = false;
     sweepBox.addEventListener("change", () => { sweepTouched = true; updateExtra(); });
     body.querySelector("#d-consensus").addEventListener("change", updateExtra);
+    body.querySelector("#d-separate").addEventListener("change", updateExtra);
     select.addEventListener("change", () => {
       if (!sweepTouched) sweepBox.checked = select.value === "voiceprint-cue";
       updateExtra();
@@ -2322,6 +2327,7 @@ function openDetectModal() {
           overwrite_manual: document.getElementById("d-overwrite").checked,
           sweep: document.getElementById("d-sweep").checked,
           consensus: document.getElementById("d-consensus").checked,
+          separate_vocals: document.getElementById("d-separate").checked,
         };
         try {
           setBusy("检测中，请稍候…（长视频首次会先解码音频）");
@@ -2478,6 +2484,7 @@ function openSettings() {
   const cfg = state.meta?.settings || {};
   const engines = state.meta?.engines || {};
   const asr = state.meta?.asr || {};
+  const vpModels = state.meta?.voiceprint_models || [];
   const sections = [
     { id: "appearance", label: "外观" },
     { id: "playback", label: "播放与复核" },
@@ -2592,12 +2599,19 @@ function openSettings() {
               <input type="number" id="set-max" min="1" value="${cfg.max_speakers ?? 6}" style="width:70px">
             </div>`))}
         ${group("声纹先验",
+          row("声纹模型", "决定特征空间；切换后需用新模型重新录入声纹（pyannote 家族生效）", vpModels.length
+            ? `<div class="select-wrap"><select id="set-vp">${vpModels.map((m) =>
+                `<option value="${m.key}" ${m.available === false ? "disabled" : ""} ${cfg.voiceprint_model === m.key ? "selected" : ""}>${escapeHtml(m.label)}${m.available === false ? "（不可用）" : ""}</option>`).join("")}</select></div>`
+            : `<span class="pill">仅内置</span>`) +
           row("匹配阈值", "自动 = 按引擎特征空间校准（pyannote≈0.66 / CAM++≈0.76 / 内置≈0.84）；匹配不上的聚类保持待定", `
             <div class="range-inputs">
               <label class="check inline"><input type="checkbox" id="set-threshold-auto" ${cfg.threshold == null ? "checked" : ""}> 自动</label>
               <input type="range" id="set-threshold" min="0.5" max="1" step="0.01" value="${cfg.threshold ?? 0.8}" ${cfg.threshold == null ? "disabled" : ""}>
               <b class="mono" id="set-threshold-val">${(cfg.threshold ?? 0.8).toFixed(2)}</b>
             </div>`))}
+        ${group("音频预处理",
+          row("人声分离（Demucs）", "检测/录入前先剥离 BGM 与伴奏；需 pip install demucs。日番或 BGM 很响时更准，但首次较慢。", `
+            <label class="check inline"><input type="checkbox" id="set-separate" ${cfg.separate_vocals ? "checked" : ""}> 启用</label>`))}
         <p class="hint">声纹只在同一特征空间内匹配；切换引擎后需用当前引擎重新录入声纹。</p>
       `;
       content.querySelector("#set-engine").addEventListener("change", (e) => saveServerSetting({ default_engine: e.target.value }));
@@ -2617,6 +2631,10 @@ function openSettings() {
         threshold.disabled = thresholdAuto.checked;
         saveServerSetting({ threshold: thresholdAuto.checked ? null : Number(threshold.value) });
       });
+      content.querySelector("#set-separate").addEventListener("change", (e) =>
+        saveServerSetting({ separate_vocals: e.target.checked }));
+      const vpSel = content.querySelector("#set-vp");
+      if (vpSel) vpSel.addEventListener("change", (e) => saveServerSetting({ voiceprint_model: e.target.value }));
     },
 
     asr() {

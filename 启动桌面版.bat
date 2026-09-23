@@ -12,5 +12,6 @@ python -c "import webview" 2>nul || (
   exit /b 1
 )
 
+python scripts\fetch_assets.py
 python desktop_pywebview.py
 pause

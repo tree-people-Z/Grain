@@ -33,6 +33,14 @@ ENGINE_SPECS: dict[str, dict] = {
         "detail": ("端到端 Transformer diarization，中/日语表现最强、无需 HF 门控。"
                    "最多同时 4 人；5 人以上请用 pyannote community-1 或字幕级声纹聚类。"),
     },
+    "diarizen": {
+        "label": "DiariZen（WavLM+EEND+VBx，非商用许可）",
+        "install": "python scripts/setup_engine.py diarizen",
+        "detail": ("BUT Speech@FIT 的开源 SOTA 说话人日志（WavLM-Large + Conformer + VBx），"
+                   "在 AMI / AliMeeting / DIHARD 等基准上优于 pyannote 3.1。"
+                   "权重为 CC BY-NC 4.0（仅限非商用）；首次运行会从 HuggingFace 下载模型。"
+                   "安装较慢，属实验性接入。"),
+    },
 }
 
 # Candidate interpreter locations inside an engine dir (Windows then POSIX).

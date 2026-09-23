@@ -30,6 +30,9 @@ numpy>=1.24,<3
 # --- Optional: ASR transcript when a file has no subtitles -----------------
 # faster-whisper
 
+# --- Optional: vocal separation before detection (设置 → 检测 → 人声分离) ---
+# demucs
+
 # --- Optional: desktop shell (启动桌面版.bat / desktop_pywebview.py) ------
 # pywebview
 # pyinstaller

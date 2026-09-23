@@ -115,6 +115,20 @@ def align(
 VOICEPRINT_FLOOR = 0.58
 VOICEPRINT_MARGIN = 0.08
 
+# A cue whose own voiceprint clears this bar against the cluster it was assigned
+# is trusted: two-engine consensus must not send it back to 待定 merely because
+# the other engine's (coarser, differently-shaped) clustering disagrees. Stored
+# per cue by ``refine_with_voiceprints`` as ``vp_score``.
+VOICEPRINT_TRUST = 0.58
+
+# Filling a still-unassigned cue from an *enrolled role voiceprint* (rather than a
+# cluster centroid) needs a higher bar: a role vector averages many takes, so a
+# genuine match scores a little lower, and the candidates now include roles the
+# diarizer never clustered at all (minor cast). Both bars are deliberately strict
+# — a miss just stays 待定, a wrong fill silently poisons the set.
+VOICEPRINT_FILL_FLOOR = 0.60
+VOICEPRINT_FILL_MARGIN = 0.10
+
 
 def refine_with_voiceprints(
     segments: list[dict],
@@ -162,16 +176,28 @@ def refine_with_voiceprints(
             key=lambda item: -item[0],
         )
         best_score, best_cluster = scored[0]
-        if best_score < floor:
-            continue
         current_cluster = segment.get("cluster")
-        if current_cluster is not None and int(current_cluster) == best_cluster:
-            continue
         current_score = None
         if current_cluster is not None and int(current_cluster) in by_cluster:
             current_score = af.cosine(vector, by_cluster[int(current_cluster)])
-        if current_score is not None and best_score - current_score < margin:
-            continue  # the voice does not clearly contradict the timing vote
+            # Record how well the cue's own voice backs the cluster it currently
+            # sits in; consensus uses this to avoid second-guessing it.
+            segment["vp_score"] = round(current_score, 3)
+
+        if best_score < floor:
+            continue
+        if current_cluster is not None and int(current_cluster) == best_cluster:
+            continue
+        if current_score is not None:
+            if best_score - current_score < margin:
+                continue  # the voice does not clearly contradict the timing vote
+        else:
+            # Filling a cue the diarizer gave no cluster: require a clear win over
+            # the runner-up too, or a two-way tie would be guessed rather than
+            # left 待定.
+            runner_up = scored[1][0] if len(scored) > 1 else None
+            if runner_up is not None and best_score - runner_up < margin:
+                continue
 
         was_assigned = segment.get("speaker_id") is not None
         segment["cluster"] = best_cluster
@@ -179,6 +205,7 @@ def refine_with_voiceprints(
         segment["status"] = "auto"
         segment["confidence"] = round(best_score, 3)
         segment["note"] = "声纹精修"
+        segment["vp_score"] = round(best_score, 3)
         if was_assigned:
             reassigned += 1
         else:
@@ -190,6 +217,66 @@ def refine_with_voiceprints(
     if filled:
         notes.append(f"声纹精修为 {filled} 条无重叠字幕补全了归属。")
     return reassigned, filled, notes
+
+
+def fill_with_role_voiceprints(
+    segments: list[dict],
+    roles: list[dict],
+    embedder,
+    floor: float = VOICEPRINT_FILL_FLOOR,
+    margin: float = VOICEPRINT_FILL_MARGIN,
+    min_duration: float = 0.20,
+    overwrite_manual: bool = False,
+) -> tuple[int, list[str]]:
+    """Give still-unassigned cues a role from the *enrolled role voiceprints*.
+
+    ``refine_with_voiceprints`` can only move a cue between clusters the diarizer
+    produced and the matcher accepted; a cue that overlaps no turn, or that sits
+    in a cluster no role claimed, has no candidate at all and stays 待定 forever.
+    Scoring the cue's own voiceprint against every enrolled role (including ones
+    the diarizer never separated — minor cast, singing voice) recovers those.
+    Only unassigned cues are touched and both bars are strict, so a confident
+    overlap decision is never overwritten. Returns ``(filled, notes)``.
+    """
+    candidates = [(role["id"], role["embedding"]) for role in (roles or [])
+                  if af.is_finite_vector(role.get("embedding"))]
+    if not candidates:
+        return 0, []
+
+    filled = 0
+    for segment in segments:
+        if segment.get("speaker_name_hint"):
+            continue
+        if segment.get("status") == "manual" and not overwrite_manual:
+            continue
+        if segment.get("speaker_id") is not None:
+            continue  # already decided by overlap/refinement — leave it alone
+        if segment["end"] - segment["start"] < min_duration:
+            continue
+        vector = embedder(segment["start"], segment["end"])
+        if not vector:
+            continue
+        scored = sorted(
+            ((af.cosine(vector, vec), role_id) for role_id, vec in candidates),
+            key=lambda item: -item[0],
+        )
+        best_score, best_role = scored[0]
+        runner_up = scored[1][0] if len(scored) > 1 else None
+        if best_score < floor:
+            continue
+        if runner_up is not None and best_score - runner_up < margin:
+            continue
+        segment["speaker_id"] = best_role
+        segment["status"] = "auto"
+        segment["confidence"] = round(best_score, 3)
+        segment["note"] = "声纹判定"
+        segment["vp_score"] = round(best_score, 3)
+        filled += 1
+
+    notes = []
+    if filled:
+        notes.append(f"声纹判定为 {filled} 条原本无归属的字幕补全了角色。")
+    return filled, notes
 
 
 def match_clusters(a_clusters: dict, b_clusters: dict,

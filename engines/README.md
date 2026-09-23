@@ -33,3 +33,21 @@ python scripts/setup_engine.py sortformer
 首次推理再从 HuggingFace 下载模型权重（约 470MB）。
 
 > 5 人以上请改用内置「pyannote community-1」或「字幕级声纹聚类」。
+
+### diarizen —— DiariZen（WavLM + EEND + VBx，实验性）
+
+BUT Speech@FIT 的开源 SOTA 说话人日志，在 AMI / AliMeeting / DIHARD 等基准上优于
+pyannote 3.1，人数不限、自带 EEND 分段与 VBx 聚类。
+
+安装：
+
+```bat
+python scripts/setup_engine.py diarizen
+```
+
+脚本会用 `uv` 建 Python 3.10 环境，`git clone` 官方仓库（含子模块），再装
+`requirements.txt` 与可编辑包。首次推理从 HuggingFace 下载权重
+（`BUT-FIT/diarizen-wavlm-large-s80-md-v2`，约 280MB）。
+
+> ⚠ 权重是 **CC BY-NC 4.0（仅限非商用）**；安装依赖 git 且耗时较长，属实验性接入。
+> 若失败，该引擎会显示为「不可用」，不影响内置引擎。

@@ -130,6 +130,7 @@ def state_payload() -> dict:
             for entry in store.load_library()
         ],
         "asr": transcribe.availability(),
+        "voiceprint_models": diarize.voiceprint_profiles(),
         "device": diarize.device_info(),
         "settings": store.public_settings(),
         "default_threshold": store.load_settings()["threshold"],
@@ -468,6 +469,8 @@ class Handler(BaseHTTPRequestHandler):
                 overwrite_manual=bool(payload.get("overwrite_manual", False)),
                 sweep=bool(payload.get("sweep", False)),
                 consensus=bool(payload.get("consensus", False)),
+                separate_vocals=bool(payload.get("separate_vocals",
+                                                 cfg.get("separate_vocals", False))),
             )
             return self._json({"ok": True, "project": project_view(project)})
 

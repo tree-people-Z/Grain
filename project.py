@@ -39,6 +39,10 @@ DEFAULT_SETTINGS = {
     "threshold": None,
     "asr_model": "small",
     "asr_language": "",
+    # Run detection / enrolment on a Demucs vocal stem (strips BGM + OP/ED).
+    "separate_vocals": False,
+    # Speaker-embedding profile for the pyannote family (see diarize.py).
+    "voiceprint_model": "wespeaker",
 }
 
 
@@ -68,6 +72,12 @@ def load_settings() -> dict:
         settings["min_speakers"], settings["max_speakers"] = (
             settings["max_speakers"], settings["min_speakers"],
         )
+    # Keep the engine layer's active voiceprint profile in sync with settings so
+    # feature-space tags (role.embedder, engine.space) always reflect reality.
+    try:
+        diarize.set_voiceprint_model(settings.get("voiceprint_model") or "wespeaker")
+    except Exception:
+        pass
     return settings
 
 
@@ -494,6 +504,31 @@ def work_wav(project: dict) -> str:
     return media.to_wav16k(source, target)
 
 
+def vocals_wav(project: dict) -> str:
+    """Decode + Demucs-separate the project audio (cached mono 16 kHz vocals WAV)."""
+    _ensure_dirs()
+    target = os.path.join(WORK_DIR, f"{project['id']}.vocals.wav")
+    source = project["media_path"]
+    if os.path.exists(target) and os.path.getmtime(target) >= os.path.getmtime(source):
+        return target
+    return media.separate_vocals(source, target)
+
+
+def analysis_wav(project: dict, separate_vocals: bool) -> tuple[str, str | None]:
+    """WAV used for detection and voiceprint work.
+
+    With ``separate_vocals`` on, both detection *and* enrolment run on the Demucs
+    vocal stem so their voiceprints stay comparable; otherwise the plain decode.
+    Falls back to the plain WAV (with a note) when Demucs is missing or fails.
+    """
+    if not separate_vocals:
+        return work_wav(project), None
+    try:
+        return vocals_wav(project), None
+    except Exception as exc:
+        return work_wav(project), f"人声分离失败，改用原始音轨：{str(exc)[:140]}"
+
+
 # --- detection + alignment --------------------------------------------------
 
 def _refine_segments(project: dict, result: dict, cluster_to_role: dict,
@@ -501,10 +536,13 @@ def _refine_segments(project: dict, result: dict, cluster_to_role: dict,
                      overwrite_manual: bool, notes: list[str]) -> None:
     """Re-decide cues by their own voiceprint where the engine used overlap only.
 
-    pyannote feature space only — the CAM++ embedder slices audio per call and
-    would be far too slow here. Failures are recorded as a note, never fatal.
+    Neural feature spaces only (pyannote wespeaker / ERes2NetV2). The CAM++
+    engine slices audio per call and would be far too slow here; the builtin
+    space carries too little speaker information to override a timing vote.
+    Failures are recorded as a note, never fatal.
     """
-    if wanted_embedder != "pyannote" or result.get("engine") == "voiceprint-cue":
+    if wanted_embedder not in ("pyannote", "eres2netv2") \
+            or result.get("engine") == "voiceprint-cue":
         return
     embedder = diarize.make_embedder(result["engine"], wav_path)
     if embedder is None:
@@ -518,6 +556,22 @@ def _refine_segments(project: dict, result: dict, cluster_to_role: dict,
         notes.extend(refine_notes)
     except Exception as exc:
         notes.append(f"声纹精修跳过：{str(exc)[:120]}")
+    # Refinement can only move a cue between clusters the matcher accepted. A cue
+    # that overlaps no turn, or lives in a cluster no role claimed, still has no
+    # candidate; match its own voiceprint against every enrolled role so minor
+    # cast and singing cues get attributed instead of sitting 待定 forever.
+    role_vectors = [role for role in project["roles"]
+                    if role.get("embedding") and role.get("type") != "ignored"
+                    and role.get("embedder", "builtin") == wanted_embedder]
+    if role_vectors:
+        try:
+            _filled, fill_notes = aligner.fill_with_role_voiceprints(
+                project["segments"], role_vectors, embedder,
+                overwrite_manual=overwrite_manual,
+            )
+            notes.extend(fill_notes)
+        except Exception as exc:
+            notes.append(f"声纹判定跳过：{str(exc)[:120]}")
 
 
 def _apply_consensus(project: dict, result: dict, engine: str, sweep: bool,
@@ -555,6 +609,10 @@ def _apply_consensus(project: dict, result: dict, engine: str, sweep: bool,
         for segment in project["segments"]:
             if segment.get("speaker_id") is None or segment.get("status") == "manual":
                 continue
+            # The cue's own voiceprint clearly backs the role it got: a second,
+            # differently-shaped clustering disagreeing is not enough to undo it.
+            if (segment.get("vp_score") or 0.0) >= aligner.VOICEPRINT_TRUST:
+                continue
             other = secondary_by_id.get(segment["id"])
             mapped = None if other is None else b_to_a.get(int(other))
             if mapped is None or segment.get("cluster") is None:
@@ -578,8 +636,8 @@ def _apply_consensus(project: dict, result: dict, engine: str, sweep: bool,
 def run_detection(project: dict, engine: str = "manual", min_speakers: int = 1,
                   max_speakers: int = 6, threshold: float | None = DEFAULT_THRESHOLD,
                   overwrite_manual: bool = False, sweep: bool = False,
-                  consensus: bool = False) -> dict:
-    wav_path = work_wav(project)
+                  consensus: bool = False, separate_vocals: bool = False) -> dict:
+    wav_path, separation_note = analysis_wav(project, separate_vocals)
     spans = [(segment["start"], segment["end"]) for segment in project["segments"]]
     if sweep:
         result = diarize.run_sweep(engine, wav_path, spans, max(1, min_speakers),
@@ -594,8 +652,16 @@ def run_detection(project: dict, engine: str = "manual", min_speakers: int = 1,
         turn.pop("embedding", None)
     project["diarization"] = result
     project["engine"] = result["engine"]
+    # Drop last run's per-cue voiceprint confidence so a cue this run does not
+    # re-score cannot inherit a stale "trusted" flag.
+    for segment in project["segments"]:
+        segment.pop("vp_score", None)
 
     notes = list(result.get("notes", []))
+    if separate_vocals and separation_note is None:
+        notes.append("已使用 Demucs 人声分离后的音轨做检测（去除 BGM / 伴奏）。")
+    elif separation_note:
+        notes.append(separation_note)
 
     # Human review is the cleanest enrolment data: fold each role's manually
     # assigned cues into its voiceprint before matching so the next run knows
@@ -955,10 +1021,13 @@ def enroll_role(project: dict, role_id: int, start: float, end: float,
                 also_library: bool = False) -> tuple[dict, list[str]]:
     """Enrol a voiceprint into the feature space detection will use."""
     role = _find_role(project, role_id)
-    wav_path = work_wav(project)
+    wav_path, separation_note = analysis_wav(
+        project, bool(load_settings().get("separate_vocals")))
     engine = enroll_engine(project)
     embedder = diarize.embedder_for(engine)
     notes = []
+    if separation_note:
+        notes.append(separation_note)
     if engine != (project.get("engine") or "manual"):
         notes.append(f"按默认引擎「{engine}」录入声纹（特征空间 {embedder}）。")
     if role.get("embedding") and role.get("embedder", "builtin") != embedder:
@@ -1013,7 +1082,8 @@ def learn_voiceprints(project: dict, engine: str | None = None,
         return 0, []
     engine = engine or enroll_engine(project)
     space = diarize.embedder_for(engine)
-    wav_path = wav_path or work_wav(project)
+    wav_path = wav_path or analysis_wav(
+        project, bool(load_settings().get("separate_vocals")))[0]
     extractor = diarize.make_embedder(engine, wav_path)
     if extractor is None:
         return 0, []
