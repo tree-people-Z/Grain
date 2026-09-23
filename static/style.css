@@ -1,0 +1,1196 @@
+/* ============================================================
+   Grain · 设计系统 v5 "Cupertino"
+   macOS 材质：中性色板 · 双主题 · 可切换强调色 · 毛玻璃 · 分段控件
+   ============================================================ */
+
+:root {
+  --bg0: #151517;
+  --bg1: #1e1e21;
+  --bg2: #26262a;
+  --bg3: #2f2f35;
+  --line: #2c2c31;
+  --line-2: #3b3b42;
+  --text: #f5f5f7;
+  --dim: #c9c9cf;
+  --muted: #8e8e93;
+  --good: #30c463;
+  --warn: #ffc94d;
+  --bad: #ff6b6b;
+  --pending: #98a0af;
+
+  --accent: #8b7cff;
+  --accent-2: #5ea2ef;
+  --grad: linear-gradient(135deg, #8b7cff 0%, #5ea2ef 100%);
+
+  --block-text: rgba(255,255,255,.82);
+  --block-current-bg: rgba(32,32,37,.95);
+  --toolbar-bg: rgba(30,30,34,.86);
+  --shadow-1: 0 1px 2px rgba(0,0,0,.3), 0 10px 32px rgba(0,0,0,.2);
+  --shadow-pop: 0 30px 90px rgba(0,0,0,.55), 0 6px 24px rgba(0,0,0,.4);
+
+  --radius: 14px;
+  --radius-sm: 9px;
+  --font: "Noto Sans SC Variable", "Noto Sans SC", -apple-system, "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, monospace;
+}
+
+:root[data-accent="blue"]  { --accent:#4da3ff; --accent-2:#6ec5ff; --grad:linear-gradient(135deg,#4da3ff,#6ec5ff); }
+:root[data-accent="rose"]  { --accent:#ff6b8a; --accent-2:#ff9f6b; --grad:linear-gradient(135deg,#ff6b8a,#ff9f6b); }
+:root[data-accent="green"] { --accent:#2ec27e; --accent-2:#7bd88f; --grad:linear-gradient(135deg,#2ec27e,#7bd88f); }
+
+:root[data-theme="light"] {
+  /* Pure white canvas. Hierarchy comes from hairline borders and a very light
+     shadow under each panel (Apple-style), never from tinting the surfaces. */
+  --bg0: #ffffff;
+  --bg1: #ffffff;
+  --bg2: #fafafa;
+  --bg3: #f2f2f2;
+  --line: #ededf0;
+  --line-2: #e0e0e4;
+  --text: #1a1a1c;
+  --dim: #52525a;
+  /* #8e8e94 only reached 3.3:1 on pure white; darken so secondary copy stays
+     legible while remaining visibly quieter than --dim. */
+  --muted: #6e6e76;
+  --pending: #9a9aa2;
+
+  /* Deeper, calmer accent: the dark-theme violet looks like candy on white. */
+  --accent: #6b5ce7;
+  --accent-2: #4a8fe0;
+  --grad: linear-gradient(135deg, #6b5ce7 0%, #4a8fe0 100%);
+
+  --good: #28a745;
+  --bad: #d64545;
+  --block-text: rgba(20,20,24,.88);
+  --block-current-bg: #ffffff;
+  --toolbar-bg: rgba(255,255,255,.78);
+  --shadow-1: 0 1px 1.5px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.05);
+  --shadow-pop: 0 12px 40px rgba(0,0,0,.14), 0 2px 8px rgba(0,0,0,.08);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; height: 100%;
+  background: var(--bg0);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13.5px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  transition: background .2s ease, color .2s ease;
+}
+
+body { display: flex; flex-direction: column; overflow: hidden; }
+
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.spacer { flex: 1; }
+.hint { color: var(--muted); font-size: 11.5px; font-weight: 400; }
+.hint.warn { color: var(--bad); }
+.warn-text { color: var(--bad); font-weight: 600; }
+::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 1px; border-radius: 6px; }
+
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--muted) 34%, transparent); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--muted) 55%, transparent); background-clip: content-box; border: 2px solid transparent; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ------------------------------------------------ buttons */
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 32px; padding: 0 13px;
+  background: var(--bg2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px;
+  font-size: 13px; font-weight: 500; font-family: inherit;
+  cursor: pointer; white-space: nowrap;
+  transition: background .14s, border-color .14s, transform .08s, box-shadow .14s, color .14s;
+}
+.btn:hover { background: var(--bg3); border-color: var(--line-2); }
+.btn:active { transform: translateY(1px) scale(.99); }
+.btn:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+.btn svg { flex: none; opacity: .8; }
+
+.btn.primary {
+  background: var(--grad); border-color: transparent; color: #fff; font-weight: 600;
+  box-shadow: 0 1px 6px color-mix(in srgb, var(--accent) 26%, transparent);
+}
+.btn.primary:hover { filter: brightness(1.08); }
+
+.btn.ghost { background: transparent; border-color: transparent; color: var(--dim); }
+.btn.ghost:hover { background: var(--bg3); color: var(--text); }
+.btn.ghost.active { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+.btn.danger { color: var(--bad); }
+.btn.danger:hover { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+
+.btn.big { height: 46px; padding: 0 30px; font-size: 15px; border-radius: 12px; }
+.btn.sm { height: 27px; padding: 0 10px; font-size: 12px; border-radius: 7px; }
+.btn.icon { width: 32px; padding: 0; border-radius: 8px; }
+.btn.icon.sm { width: 26px; height: 26px; border-radius: 7px; }
+
+.btn kbd {
+  font-family: var(--mono); font-size: 10px; color: var(--muted);
+  background: var(--bg0); border: 1px solid var(--line-2); border-radius: 4px; padding: 0 4px;
+}
+body.hide-kbd kbd, body.hide-kbd .speaker-btn .key { display: none; }
+
+/* ------------------------------------------------ toolbar */
+
+.toolbar {
+  display: flex; align-items: center; gap: 12px;
+  height: 52px; padding: 0 16px; flex: none;
+  background: var(--toolbar-bg);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border-bottom: 1px solid var(--line);
+  z-index: 10;
+}
+.traffic { display: none; }
+
+/* 无边框窗口的自绘窗口按钮：只在桌面壳（pywebview）里出现，贴在导航栏右端。 */
+.win-controls { display: none; align-items: center; gap: 2px; margin-left: 2px; }
+body.desktop-shell .win-controls { display: flex; }
+.win-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; padding: 0;
+  background: transparent; border: none; border-radius: 8px;
+  color: var(--dim); cursor: pointer;
+  transition: background .14s, color .14s;
+}
+.win-btn:hover { background: var(--bg3); color: var(--text); }
+.win-btn:active { transform: scale(.96); }
+.win-btn.close:hover { background: var(--bad); color: #fff; }
+
+.brand { display: flex; align-items: center; gap: 10px; margin-right: 8px; }
+.brand-mark {
+  display: inline-flex; align-items: flex-end; gap: 2.5px;
+  width: 25px; height: 25px; padding: 6px 5px;
+  background: var(--grad); border-radius: 7px;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.brand-mark i { flex: 1; background: rgba(255,255,255,.95); border-radius: 2px; }
+.brand-mark i:nth-child(1) { height: 45%; }
+.brand-mark i:nth-child(2) { height: 100%; }
+.brand-mark i:nth-child(3) { height: 70%; }
+.brand-text { font-weight: 600; font-size: 15px; letter-spacing: .1px; display: flex; align-items: baseline; gap: 9px; }
+.brand-text small { font-weight: 400; font-size: 10.5px; color: var(--muted); letter-spacing: 1.4px; text-transform: uppercase; }
+
+.toolbar-group { display: flex; align-items: center; gap: 7px; }
+.toolbar-group + .toolbar-group { margin-left: 6px; padding-left: 14px; border-left: 1px solid var(--line); }
+.toolbar-group.tools { gap: 4px; }
+
+/* theme toggle shows one glyph at a time; both live in the same button */
+#btn-theme .ico-moon { display: none; }
+:root[data-theme="light"] #btn-theme .ico-sun { display: none; }
+:root[data-theme="light"] #btn-theme .ico-moon { display: block; }
+
+.select-wrap select {
+  height: 32px; max-width: 240px;
+  background: var(--bg2) url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238e8e93' fill='none' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 10px center;
+  color: var(--text); border: 1px solid var(--line-2); border-radius: 8px;
+  padding: 0 28px 0 11px; font-size: 12.5px; font-family: inherit;
+  appearance: none; cursor: pointer;
+  transition: border-color .14s, background .14s;
+}
+.select-wrap select:hover { background-color: var(--bg3); }
+.field select option, .select-wrap select option { background: var(--bg1); color: var(--text); }
+
+.status { color: var(--muted); font-size: 12px; font-weight: 500; }
+.status.busy { color: var(--warn); }
+.status.ok { color: var(--good); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.status-dot.ok { background: var(--good); }
+.status-dot.off { background: var(--line-2); }
+
+/* ------------------------------------------------ stage */
+
+#stage { flex: 1; overflow-y: auto; overflow-x: hidden; position: relative; }
+#stage.empty { display: grid; place-items: center; }
+
+/* ------------------------------------------------ workspace grid */
+
+/* Horizontal space is plentiful and vertical space is scarce, while a 16:9
+   picture is height-hungry. So the top band is split into three columns —
+   picture, current cue, speaker library — and the two components that genuinely
+   need full width (timeline, clip list) span the whole grid beneath it. */
+.workspace {
+  display: grid;
+  grid-template-columns:
+    minmax(360px, var(--media-col, 496px))
+    minmax(280px, 1fr)
+    minmax(240px, 300px);
+  grid-template-rows: minmax(240px, var(--media-rows, 34vh))
+                     auto
+                     minmax(110px, 1fr);
+  grid-template-areas:
+    "media cue   side"
+    "track track track"
+    "queue queue queue";
+  gap: 10px; padding: 10px;
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.panel {
+  background: var(--bg1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  display: flex; flex-direction: column;
+  min-height: 0; min-width: 0;
+  overflow: hidden;
+  box-shadow: var(--shadow-1);
+}
+.media-panel  { grid-area: media; }
+.side-panel   { grid-area: side; }
+.track-panel  { grid-area: track; }
+.cue-panel    { grid-area: cue; }
+.queue-panel  { grid-area: queue; }
+
+.panel-head {
+  display: flex; align-items: center; gap: 9px;
+  height: 42px; padding: 0 14px; flex: none; flex-wrap: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+.panel-title { font-weight: 600; font-size: 13px; letter-spacing: .1px; }
+.head-hint { color: var(--muted); font-size: 11.5px; margin-left: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kicker { width: 8px; height: 8px; border-radius: 3px; flex: none; }
+.kicker.k-media   { background: var(--accent-2); }
+.kicker.k-track   { background: var(--accent); }
+.kicker.k-current { background: var(--good); }
+.kicker.k-queue   { background: var(--warn); }
+.vr { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
+.timecode { font-size: 11.5px; color: var(--dim); white-space: nowrap; }
+.media-panel .panel-head { gap: 7px; }
+.zoom { font-size: 11.5px; color: var(--muted); min-width: 38px; text-align: center; }
+
+/* toggle switch (macOS style) */
+.toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); cursor: pointer; user-select: none; }
+.toggle input { display: none; }
+.toggle i {
+  width: 30px; height: 17px; border-radius: 999px; flex: none;
+  background: var(--bg3); border: 1px solid var(--line);
+  position: relative; transition: background .18s, border-color .18s;
+}
+.toggle i::after {
+  content: ""; position: absolute; top: 1.5px; left: 2px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35);
+  transition: transform .18s cubic-bezier(.2,.9,.3,1.2);
+}
+.toggle input:checked + i { background: var(--good); border-color: transparent; }
+.toggle input:checked + i::after { transform: translateX(12.5px); }
+
+/* ------------------------------------------------ media */
+
+.media-host { flex: 1; background: #000; position: relative; min-height: 120px; overflow: hidden; }
+:root[data-theme="light"] .media-host { background: #1a1a1c; }
+/* Fit the video box to the panel instead of stretching the panel to the video:
+   a 16:9 picture inside a taller grid cell would letterbox on all four sides. */
+/* Absolute positioning guarantees the media box is exactly the panel size, so
+   object-fit: contain can letterbox the picture correctly. A grid/flex child
+   with height:100% instead fell back to the video's intrinsic size. */
+.media-host video {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain; background: #000;
+}
+.media-host video:not([src]) { display: none; }
+.media-host audio {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(560px, 90%);
+}
+
+/* ------------------------------------------------ timeline track */
+
+.track-outer {
+  position: relative; padding: 6px 0 8px;
+  cursor: grab; user-select: none; overflow: hidden;
+  flex: 1 1 auto; min-height: 0; display: flex; align-items: center;
+  background: radial-gradient(1100px 90px at 50% 0%,
+    color-mix(in srgb, var(--accent) 6%, transparent), transparent 70%);
+}
+.track-outer.dragging { cursor: grabbing; }
+.track { position: relative; width: 100%; }
+
+.ruler { display: block; width: 100%; height: 20px; }
+
+.track-lanes { display: flex; flex-direction: column; gap: 3px; margin: 3px 0; }
+.track-lanes:empty { display: none; }
+.lane {
+  position: relative; height: 22px; border-radius: 5px;
+  background: color-mix(in srgb, var(--pending) 7%, transparent);
+}
+.lane-label {
+  position: absolute; left: 0; top: 0; height: 100%;
+  display: flex; align-items: center; padding: 0 7px;
+  font-size: 9.5px; font-weight: 700; color: var(--dim);
+  pointer-events: none; z-index: 2;
+  background: linear-gradient(90deg, var(--bg1) 60%, transparent);
+  border-radius: 4px 0 0 4px;
+}
+.lane-bar {
+  position: absolute; top: 2px; bottom: 2px;
+  border-radius: 3px; background: var(--lane-color, var(--accent));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.22);
+  opacity: .55; cursor: pointer; min-width: 2px;
+  transition: opacity .12s ease;
+}
+.lane-bar:hover { opacity: .95; }
+.lane.pending .lane-bar { opacity: .3; background: repeating-linear-gradient(45deg,
+  var(--pending) 0 4px, transparent 4px 8px); }
+
+.track-main {
+  position: relative; height: 84px; border-radius: 10px;
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--text) 3%, transparent),
+    color-mix(in srgb, var(--bg0) 22%, transparent));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.waveform { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 10px; opacity: .92; }
+
+.track-blocks { position: absolute; inset: 0; }
+
+.track-block {
+  position: absolute; top: 6px; height: 72px;
+  border-radius: 9px;
+  padding: 4px 8px 4px 10px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--pending) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-left: 3px solid var(--pending);
+  cursor: pointer;
+  display: flex; flex-direction: column; gap: 1px;
+  transition: transform .16s ease, box-shadow .16s ease, top .16s ease, height .16s ease, background .16s ease;
+}
+.track-block:hover { background: color-mix(in srgb, var(--pending) 22%, transparent); }
+.track-block .tb-name {
+  font-size: 10px; font-weight: 700; letter-spacing: .2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.track-block .tb-text {
+  font-size: 10.5px; line-height: 1.3; color: var(--block-text);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.track-block .tb-translation {
+  font-size: 9.5px; line-height: 1.25; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-style: italic;
+}
+/* Confidence is a corner badge so it never competes with the cue text. */
+.track-block .tb-conf {
+  position: absolute; right: 4px; bottom: 3px;
+  font-size: 9px; line-height: 1; color: var(--dim);
+  background: color-mix(in srgb, var(--bg0) 62%, transparent);
+  border-radius: 4px; padding: 1px 3px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+/* Narrow cue: only the name and one truncated line of dialogue. */
+.track-block[data-detail="min"] .tb-text { -webkit-line-clamp: 1; }
+.track-block[data-detail="min"] .tb-name { font-size: 9px; }
+.track-block[data-detail="mid"] .tb-text { -webkit-line-clamp: 2; }
+
+.track-block.pending { border-style: dashed; background: color-mix(in srgb, var(--pending) 8%, transparent); }
+.track-block.pending .tb-name { color: var(--pending) !important; }
+
+.track-block.selected { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+
+.track-block.current {
+  top: 0; height: 84px; z-index: 5;
+  background: var(--block-current-bg);
+  transform: scale(1.015);
+  transform-origin: center;
+  will-change: transform;
+  box-shadow: 0 0 0 2px var(--cur-color, var(--accent)), 0 12px 34px rgba(0,0,0,.4);
+}
+
+.track-block.reviewed::after {
+  content: "✓";
+  position: absolute; top: 4px; right: 6px;
+  font-size: 9.5px; line-height: 1; color: #fff;
+  background: var(--good); border-radius: 999px; padding: 2px 4.5px;
+  font-weight: 800;
+}
+
+.playhead {
+  position: absolute; left: 0; top: 24px; bottom: 4px; width: 2px;
+  background: var(--accent);
+  border-radius: 2px;
+  transform: translateX(-1px);
+  will-change: transform;
+  pointer-events: none;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 70%, transparent);
+  display: none;
+}
+.playhead::before {
+  content: ""; position: absolute; top: -4px; left: -4px;
+  border: 5px solid transparent; border-top-color: var(--accent); border-radius: 2px;
+}
+
+.track-meta { display: flex; align-items: center; gap: 8px; padding: 7px 14px 10px; }
+.track-meta .mono { font-size: 11px; color: var(--muted); }
+
+/* ------------------------------------------------ side panel */
+
+.side-body { padding: 8px 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 9px; flex: 1; }
+.side-group-title { margin-bottom: 2px; }
+.side-group { display: flex; flex-direction: column; gap: 7px; }
+.side-group-title {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase;
+  color: var(--muted);
+}
+
+.role-summary { display: flex; flex-direction: column; gap: 6px; }
+.role-chip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border-radius: 9px;
+  background: var(--bg2); border: 1px solid var(--line);
+  font-size: 12px;
+}
+.role-chip .swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.role-chip b { font-weight: 600; }
+.role-chip .pill { margin-left: auto; }
+
+/* Rows are tight and the engine name is truncated: the panel shares its row
+   height with the video, so the speaker list must not be pushed out of view. */
+.detect-summary { display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; color: var(--dim); }
+.detect-summary .row { display: flex; justify-content: space-between; gap: 8px; line-height: 1.5; }
+.detect-summary .row b {
+  color: var(--text); font-variant-numeric: tabular-nums;
+  max-width: 60%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.detect-summary .notes {
+  margin: 0; padding: 8px 10px; border-radius: 8px;
+  background: var(--bg2); border: 1px solid var(--line);
+  color: var(--muted); font-size: 11px; line-height: 1.6; max-height: 130px; overflow: auto;
+}
+
+/* ------------------------------------------------ cue bar (current cue + speakers) */
+
+.cue-bar {
+  display: flex; align-items: stretch; gap: 16px;
+  padding: 9px 14px;
+  flex: 1; min-height: 0;
+}
+.cue-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.cue-head { display: flex; align-items: center; gap: 10px; }
+.current-range { font-size: 11.5px; color: var(--accent); letter-spacing: .3px; }
+.current-text {
+  font-size: 18px; font-weight: 600; line-height: 1.45;
+  letter-spacing: .1px;
+  overflow: auto;
+}
+.current-translation {
+  font-size: 13.5px; line-height: 1.5; color: var(--dim);
+  padding-left: 10px; border-left: 2px solid var(--line-2);
+  overflow: auto;
+}
+.cue-assign {
+  width: 420px; flex: none; display: flex; flex-direction: column; gap: 8px;
+  border-left: 1px solid var(--line); padding-left: 18px;
+}
+.assign-head { display: flex; align-items: baseline; gap: 8px; }
+.assign-label {
+  font-size: 11px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase;
+  color: var(--muted);
+}
+.assign-label + .hint { letter-spacing: 0; text-transform: none; }
+.speaker-buttons {
+  display: flex; flex-wrap: nowrap; gap: 7px;
+  overflow-x: auto; overflow-y: hidden;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
+}
+.speaker-buttons::-webkit-scrollbar { height: 5px; }
+.speaker-btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 32px; padding: 0 12px;
+  background: var(--bg2); border: 1px solid var(--line); border-radius: 9px;
+  color: var(--text); font-size: 12.5px; font-weight: 600; font-family: inherit;
+  cursor: pointer; position: relative;
+  transition: transform .1s, background .14s, border-color .14s, box-shadow .14s;
+}
+.speaker-btn::before {
+  content: ""; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--role-color, var(--muted));
+  box-shadow: 0 0 6px color-mix(in srgb, var(--role-color, transparent) 60%, transparent);
+}
+.speaker-btn .key {
+  font-family: var(--mono); font-size: 9.5px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 4px;
+}
+.speaker-btn:hover { transform: translateY(-1px); border-color: var(--role-color, var(--line-2)); }
+.speaker-btn.active {
+  background: var(--role-color, var(--bg3));
+  border-color: var(--role-color, transparent);
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,.25);
+  box-shadow: 0 3px 14px color-mix(in srgb, var(--role-color, transparent) 45%, transparent);
+}
+.speaker-btn.active .key { color: rgba(255,255,255,.85); border-color: rgba(255,255,255,.35); }
+.speaker-btn.active::before { background: rgba(255,255,255,.55); box-shadow: none; }
+.speaker-btn.pending-btn { border-style: dashed; color: var(--muted); }
+.speaker-btn.pending-btn::before { background: transparent; border: 1px dashed var(--pending); box-shadow: none; }
+.speaker-btn.pending-btn.active { background: var(--bg3); color: var(--text); }
+
+.btn-col { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.btn-col .btn { justify-content: flex-start; }
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ------------------------------------------------ queue */
+
+.filters {
+  display: inline-flex; gap: 2px;
+  background: var(--bg3); border-radius: 9px; padding: 2px;
+}
+.chip {
+  height: 24px; padding: 0 11px; border-radius: 7px;
+  background: transparent; border: none; color: var(--muted);
+  font-size: 11.5px; font-weight: 600; font-family: inherit; cursor: pointer;
+  transition: all .14s;
+}
+.chip:hover { color: var(--text); }
+.chip.active {
+  background: var(--bg1); color: var(--text);
+  box-shadow: 0 1px 4px rgba(0,0,0,.22);
+}
+:root[data-theme="light"] .chip.active { box-shadow: 0 1px 4px rgba(0,0,0,.14); }
+
+.search {
+  height: 28px; width: 170px;
+  background: var(--bg2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 9px;
+  padding: 0 13px; font-size: 12px; font-family: inherit;
+  transition: width .18s, border-color .14s, background .14s;
+}
+.search:focus { width: 220px; border-color: var(--accent); outline: none; }
+.search::placeholder { color: var(--muted); }
+
+.lang-seg {
+  display: inline-flex; gap: 2px; margin-right: 8px;
+  background: var(--bg3); border-radius: 9px; padding: 2px;
+}
+.lang-seg button {
+  border: none; background: transparent; color: var(--muted);
+  height: 24px; padding: 0 11px; border-radius: 7px;
+  font-size: 11.5px; font-weight: 600; font-family: inherit; cursor: pointer;
+  transition: all .14s;
+}
+.lang-seg button:hover { color: var(--text); }
+.lang-seg button.active { background: var(--bg1); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,.22); }
+
+.queue { overflow: auto; flex: 1; padding: 2px 0; }
+.queue-item {
+  display: grid; grid-template-columns: 108px 108px 1fr 58px;
+  gap: 10px; align-items: center;
+  padding: 8px 14px; cursor: pointer;
+  border-left: 2px solid transparent;
+  font-size: 12.5px;
+  border-radius: 8px; margin: 1px 6px;
+}
+.queue-item:hover { background: var(--bg2); }
+.queue-item.current { background: color-mix(in srgb, var(--accent) 9%, transparent); border-left-color: var(--accent); }
+.queue-item .q-time { font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+.queue-item .q-speaker { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue-item .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: -1px; }
+.queue-item .q-text { min-width: 0; }
+.queue-item .q-line { display: block; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue-item.current .q-line { color: var(--text); }
+.queue-item .q-line.translation { color: var(--muted); font-size: 11.5px; font-style: italic; }
+.queue-item .q-status { font-size: 10.5px; color: var(--muted); text-align: right; }
+.queue-empty { padding: 22px; text-align: center; color: var(--muted); font-size: 12.5px; }
+
+/* ------------------------------------------------ status bar */
+
+.statusbar {
+  display: flex; align-items: center; gap: 16px;
+  height: 34px; padding: 0 16px; flex: none;
+  background: var(--bg1); border-top: 1px solid var(--line);
+  font-size: 12px; color: var(--dim);
+}
+.stat { display: inline-flex; align-items: center; gap: 7px; }
+.stat b { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.dot { width: 8px; height: 8px; border-radius: 50%; }
+.dot.total { background: var(--accent-2); }
+.dot.assigned { background: var(--good); }
+.dot.pending { background: transparent; border: 1px dashed var(--pending); }
+.dot.roles { background: var(--accent); }
+.dot.progress { background: var(--warn); }
+#stat-message { text-align: right; }
+
+/* ------------------------------------------------ badges */
+
+.badge {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .3px;
+  padding: 3px 10px; border-radius: 999px;
+  background: var(--bg3); border: 1px solid var(--line); color: var(--muted);
+}
+.badge.manual { color: #fff; background: var(--good); border-color: transparent; }
+.badge.auto { color: #fff; background: var(--grad); border-color: transparent; }
+
+/* ------------------------------------------------ modal */
+
+#modal-root:empty { display: none; }
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 100;
+  background: color-mix(in srgb, #000 45%, transparent);
+  backdrop-filter: blur(8px) saturate(1.2);
+  -webkit-backdrop-filter: blur(8px) saturate(1.2);
+  display: grid; place-items: center;
+  animation: fadeIn .16s ease;
+}
+.modal {
+  width: min(680px, 92vw); max-height: 86vh;
+  background: var(--bg1); border: 1px solid var(--line); border-radius: 16px;
+  box-shadow: var(--shadow-pop);
+  display: flex; flex-direction: column;
+  animation: slideUp .22s cubic-bezier(.2,.9,.3,1.15);
+  overflow: hidden;
+}
+.modal-wide { width: min(860px, 94vw); }
+@keyframes fadeIn { from { opacity: 0; } }
+@keyframes slideUp { from { opacity: 0; transform: translateY(16px) scale(.98); } }
+.modal h2 {
+  margin: 0; padding: 15px 20px; font-size: 15px; font-weight: 700;
+  border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 10px;
+}
+.modal h2::before { content: ""; width: 8px; height: 8px; border-radius: 3px; background: var(--grad); }
+.modal-body { padding: 18px 20px; overflow: auto; display: flex; flex-direction: column; gap: 15px; }
+.modal-foot {
+  padding: 12px 20px; border-top: 1px solid var(--line);
+  display: flex; gap: 10px; justify-content: flex-end;
+  background: var(--bg2);
+}
+.modal p { margin: 0; }
+.modal code {
+  font-family: var(--mono); font-size: 11.5px; color: var(--accent);
+  background: var(--bg2); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px;
+}
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field label { font-size: 12px; font-weight: 600; color: var(--dim); }
+.field input[type="text"], .field input[type="number"], .field input[type="password"], .field select {
+  height: 34px; width: 100%;
+  background: var(--bg2); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: 8px;
+  padding: 0 11px; font-size: 13px; font-family: inherit;
+}
+.field input:focus, .field select:focus { border-color: var(--accent); outline: none; }
+.field-row { display: flex; gap: 12px; }
+.field-row .field { flex: 1; }
+
+/* Collapsed "advanced" block so the common modal stays minimal. */
+.adv { border-top: 1px solid var(--line); padding-top: 8px; }
+.adv > summary {
+  cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted);
+  list-style: none; user-select: none;
+}
+.adv > summary::-webkit-details-marker { display: none; }
+.adv > summary::before { content: "▸  "; }
+.adv[open] > summary::before { content: "▾  "; }
+.adv-body { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; }
+.path-input { display: flex; gap: 8px; align-items: center; }
+.path-input input { flex: 1; min-width: 0; }
+.path-input button[hidden] { display: none; }
+.path-input .btn { height: 34px; flex: 0 0 auto; white-space: nowrap; }
+.grid-checks { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.check {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 11px; font-size: 12.5px; cursor: pointer;
+  background: var(--bg2); border: 1px solid var(--line); border-radius: 9px;
+}
+.check:hover { border-color: var(--line-2); }
+.check.inline { display: inline-flex; padding: 0; border: none; background: none; white-space: nowrap; }
+.check input { accent-color: var(--accent); }
+
+/* range slider (macOS style) — the input keeps a tall hit box so the whole
+   track/thumb is clickable; only the runnable track is thin. */
+input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  width: 150px; height: 20px; background: transparent;
+  outline: none; cursor: pointer; margin: 0;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 999px; background: var(--line-2);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; border-radius: 50%;
+  margin-top: -6px; /* centres the 16px thumb on the 4px track */
+  background: #fff; border: 1px solid rgba(0,0,0,.15);
+  box-shadow: 0 1px 4px rgba(0,0,0,.35);
+}
+input[type="range"]::-moz-range-track {
+  height: 4px; border-radius: 999px; background: var(--line-2);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 16px; height: 16px; border: 1px solid rgba(0,0,0,.15);
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35);
+}
+:root[data-theme="light"] input[type="range"]::-webkit-slider-thumb { box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+
+/* ------------------------------------------------ settings center
+   Apple System Settings grammar: a quiet sidebar with a soft grey selection
+   pill, content grouped by hairline separators rather than nested boxes. */
+
+.settings-body { display: flex; min-height: 460px; max-height: 68vh; }
+.set-nav {
+  width: 192px; flex: none;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  padding: 14px 10px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.set-item {
+  text-align: left; padding: 8px 12px; border-radius: 8px;
+  background: transparent; border: none; color: var(--dim);
+  font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.set-item:hover { background: var(--bg3); color: var(--text); }
+/* Selected item is a soft grey pill, not a saturated block. */
+.set-item.active { background: var(--bg3); color: var(--text); font-weight: 600; }
+
+.set-content { flex: 1; padding: 20px 26px 26px; overflow: auto; }
+.set-content.fade { animation: setContent .18s ease; }
+@keyframes setContent { from { opacity: .3; transform: translateY(5px); } }
+
+.set-group { margin-bottom: 26px; }
+.set-group-title {
+  font-size: 12px; font-weight: 600; color: var(--muted);
+  letter-spacing: .2px; margin: 0 2px 10px;
+}
+/* No nested container: rows sit directly on the surface, divided by hairlines. */
+.set-group-box {
+  background: transparent; border: none; border-radius: 0;
+  padding: 0;
+}
+.set-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  padding: 14px 2px; border-bottom: 1px solid var(--line);
+}
+.set-row:last-child { border-bottom: none; }
+.set-label { min-width: 0; }
+.set-label b { display: block; font-size: 13px; font-weight: 500; }
+.set-label span { font-size: 11.5px; color: var(--muted); display: block; margin-top: 1px; }
+.set-control { flex: none; display: flex; align-items: center; }
+
+.segmented {
+  display: inline-flex; gap: 2px;
+  background: var(--bg3); border-radius: 9px; padding: 2px;
+}
+.segmented button {
+  border: none; background: transparent; color: var(--muted);
+  padding: 5px 13px; border-radius: 7px;
+  font-size: 12px; font-weight: 600; font-family: inherit; cursor: pointer;
+  transition: all .13s;
+}
+.segmented button:hover { color: var(--text); }
+.segmented button.active { background: var(--bg1); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,.22); }
+
+.accent-dots { display: inline-flex; gap: 9px; }
+.accent-dots button {
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--c); border: 2px solid transparent; cursor: pointer;
+  transition: transform .12s, box-shadow .12s;
+}
+.accent-dots button:hover { transform: scale(1.12); }
+.accent-dots button.active {
+  box-shadow: 0 0 0 2px var(--bg1), 0 0 0 4px var(--c);
+}
+
+.range-inputs { display: flex; align-items: center; gap: 9px; }
+.range-inputs b { font-size: 12px; min-width: 34px; }
+.range-inputs input[type="text"], .range-inputs input[type="number"], .range-inputs input[type="password"] {
+  height: 30px; background: var(--bg1); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: 8px; padding: 0 10px;
+  font-size: 12.5px; font-family: inherit;
+}
+.range-inputs input:focus { border-color: var(--accent); outline: none; }
+
+/* ------------------------------------------------ role rows / files */
+
+.role-actions { display: flex; align-items: center; gap: 10px; }
+.role-actions .hint { flex: 1; min-width: 0; }
+
+.role-row {
+  display: grid; grid-template-columns: 24px 1fr 34px auto;
+  gap: 10px; align-items: center;
+  padding: 9px 0; border-bottom: 1px solid var(--line);
+}
+.role-row .swatch {
+  width: 20px; height: 20px; border-radius: 6px; cursor: pointer;
+  border: 1px solid color-mix(in srgb, #fff 25%, transparent);
+  box-shadow: 0 0 8px rgba(0,0,0,.4);
+}
+.role-row input[type="text"] { height: 30px; padding: 0 9px; }
+.role-row .meta { font-size: 11px; color: var(--muted); }
+.role-row > div:nth-child(2) { display: flex; flex-direction: column; gap: 2px; }
+
+.note-list { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12px; line-height: 1.8; }
+.file-list { display: flex; flex-direction: column; gap: 8px; }
+.file-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; background: var(--bg2);
+  border: 1px solid var(--line); border-radius: 10px;
+}
+.file-item a { color: var(--accent); text-decoration: none; font-weight: 600; font-size: 12.5px; }
+.file-item a:hover { text-decoration: underline; }
+.pill { font-size: 11px; color: var(--muted); }
+
+/* ------------------------------------------------ drop overlay */
+
+#drop-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  display: none; place-items: center;
+  background: color-mix(in srgb, var(--accent) 14%, rgba(0,0,0,.55));
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  color: #fff; font-size: 17px; font-weight: 650; letter-spacing: .5px;
+  pointer-events: none;
+  padding: 0 30px; text-align: center;
+}
+#drop-overlay.visible { display: grid; }
+#drop-overlay::before {
+  content: ""; position: absolute; inset: 14px;
+  border: 2px dashed color-mix(in srgb, #fff 65%, transparent);
+  border-radius: 16px;
+}
+
+/* ------------------------------------------------ responsive */
+
+@media (max-width: 1400px) {
+  .workspace { grid-template-columns: minmax(0, 1fr) 268px; }
+}
+@media (max-width: 1240px) {
+  .workspace { grid-template-columns: minmax(0, 1fr) 236px; }
+  .cue-assign { width: 360px; }
+}
+@media (max-width: 1180px) {
+  .workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto minmax(240px, 1fr);
+    grid-template-areas: "media" "side" "track" "cue" "queue";
+    overflow: auto;
+  }
+  .media-host video { max-height: 40vh; }
+  .cue-bar { flex-direction: column; }
+  .cue-assign { width: auto; border-left: none; padding-left: 0; border-top: 1px solid var(--line); padding-top: 12px; }
+}
+
+/* ------------------------------------------------ device indicator */
+
+.device-row .card {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 9px 12px; border-radius: 9px; width: 100%;
+  background: var(--bg2); border: 1px solid var(--line);
+}
+.device-row .card b { font-size: 12.5px; }
+.device-row.ok .card { border-color: color-mix(in srgb, var(--good) 55%, transparent); }
+.device-row.ok .card b { color: var(--good); }
+.device-row.warn .card { border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+.device-row.warn .card b { color: var(--warn); }
+
+/* ------------------------------------------------ PR-style timeline controls */
+
+.track-outer.hand-tool { cursor: grab; }
+.track-outer.hand-tool:active { cursor: grabbing; }
+.track-outer.scrubbing { cursor: ew-resize; }
+.track-outer.panning { cursor: grabbing; }
+.track-outer.banding { cursor: crosshair; }
+#ruler { cursor: ew-resize; }
+#ruler:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+
+/* ============================================================
+   纯白主题细节覆盖（Apple 系统风）
+   白底必须靠发丝线与极淡投影分层，不能用底色深浅
+   ============================================================ */
+
+/* --- 媒体框：嵌入式监视器，而不是挖黑的洞 --- */
+:root[data-theme="light"] .media-host {
+  background: #ffffff;
+  padding: 10px;
+}
+:root[data-theme="light"] .media-host video {
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.10), 0 6px 20px rgba(0,0,0,.10);
+  outline: 1px solid rgba(0,0,0,.06);
+  outline-offset: -1px;
+}
+
+/* --- 面板：纯白 + 发丝线 + 极淡投影（A2） --- */
+:root[data-theme="light"] .panel {
+  border-color: var(--line);
+  box-shadow: 0 1px 1.5px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.05);
+}
+/* 面板头不再用灰底区分，只留标题色条与底部发丝线 */
+:root[data-theme="light"] .panel-head {
+  background: #ffffff;
+  border-bottom-color: var(--line);
+}
+
+/* --- 按钮：白底上靠底衬与发丝线，不靠边框厚度 --- */
+:root[data-theme="light"] .btn {
+  background: #ffffff;
+  border-color: var(--line-2);
+}
+:root[data-theme="light"] .btn:hover { background: var(--bg2); border-color: #d5d5da; }
+/* Primary must come after the white base and re-assert the gradient, otherwise
+   the white background wins and the button looks disabled. */
+:root[data-theme="light"] .btn.primary {
+  background: var(--grad);
+  border-color: transparent;
+  color: #ffffff;
+  /* 去掉彩色光晕：白底上光晕会发脏 */
+  box-shadow: 0 1px 2px rgba(107,92,231,.22);
+}
+:root[data-theme="light"] .btn.primary:hover { background: var(--grad); filter: brightness(1.06); }
+:root[data-theme="light"] .btn.ghost { background: transparent; border-color: transparent; }
+:root[data-theme="light"] .btn.ghost:hover { background: var(--bg3); }
+:root[data-theme="light"] .btn.ghost.active {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
+/* --- 工具栏：更透的毛玻璃 --- */
+:root[data-theme="light"] .toolbar {
+  background: var(--toolbar-bg);
+  border-bottom-color: var(--line);
+}
+
+/* --- 输入类控件：微凹面 --- */
+:root[data-theme="light"] .search,
+:root[data-theme="light"] .select-wrap select,
+:root[data-theme="light"] .field input,
+:root[data-theme="light"] .field select {
+  background: var(--bg2);
+  border-color: var(--line-2);
+}
+:root[data-theme="light"] .search:focus { background: #ffffff; }
+
+/* --- 轨道块：白底对比度必须加强 --- */
+:root[data-theme="light"] .track-block {
+  background: color-mix(in srgb, var(--pending) 16%, transparent);
+  border-color: rgba(0,0,0,.10);
+}
+:root[data-theme="light"] .track-block:hover {
+  background: color-mix(in srgb, var(--pending) 24%, transparent);
+}
+:root[data-theme="light"] .track-block.pending {
+  border-color: #c8c8cc;
+  background: #fbfbfc;
+}
+:root[data-theme="light"] .track-block.current {
+  background: #ffffff;
+  box-shadow: 0 0 0 2px var(--cur-color, var(--accent)), 0 6px 18px rgba(0,0,0,.16);
+}
+/* 泳道底：白底上需要可见的浅槽 */
+:root[data-theme="light"] .lane { background: #f7f7f8; }
+:root[data-theme="light"] .lane-label {
+  background: linear-gradient(90deg, #ffffff 62%, transparent);
+  color: var(--dim);
+}
+
+/* --- 标尺与波形：白底上降低饱和度 --- */
+:root[data-theme="light"] #ruler:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+:root[data-theme="light"] .waveform { opacity: .75; }
+
+/* --- 清单：当前行用浅色衬底而非半透明紫 --- */
+:root[data-theme="light"] .queue-item:hover { background: var(--bg2); }
+:root[data-theme="light"] .queue-item.current {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border-left-color: var(--accent);
+}
+
+/* --- 状态栏：轻微下沉，与内容区分隔 --- */
+:root[data-theme="light"] .statusbar {
+  background: var(--bg2);
+  border-top-color: var(--line);
+}
+
+/* --- 分段控件与筛选胶囊 --- */
+:root[data-theme="light"] .filters,
+:root[data-theme="light"] .segmented,
+:root[data-theme="light"] .lang-seg { background: var(--bg3); }
+:root[data-theme="light"] .chip.active,
+:root[data-theme="light"] .segmented button.active,
+:root[data-theme="light"] .lang-seg button.active {
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0,0,0,.10);
+}
+
+/* --- 说话人按钮：白底上用淡色底衬 + 主色边 --- */
+:root[data-theme="light"] .speaker-btn { background: #ffffff; }
+/* Active must re-assert the role colour with enough specificity: without this
+   the white base background wins and the label disappears. */
+:root[data-theme="light"] .speaker-btn.active {
+  /* Deeper fill (--role-color-ink) keeps white text legible where the raw
+     palette colour would only reach ~2.8:1. */
+  background: var(--role-color-ink, var(--role-color, var(--accent)));
+  color: #ffffff;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--role-color, transparent) 38%, transparent);
+}
+:root[data-theme="light"] .speaker-btn.active .key {
+  color: rgba(255,255,255,.9);
+  border-color: rgba(255,255,255,.45);
+}
+
+/* --- 徽章 --- */
+:root[data-theme="light"] .badge { background: var(--bg3); border-color: var(--line-2); }
+
+/* --- 弹窗：纯白、投影承担分层 --- */
+:root[data-theme="light"] .modal {
+  border-color: var(--line);
+  box-shadow: var(--shadow-pop);
+}
+:root[data-theme="light"] .modal h2 { background: #ffffff; border-bottom-color: var(--line); }
+:root[data-theme="light"] .modal-foot { background: var(--bg2); border-top-color: var(--line); }
+:root[data-theme="light"] .modal-backdrop { background: rgba(0,0,0,.28); }
+
+/* --- 纯白主题：图标按钮需要更实的轮廓，否则在白底上"消失" --- */
+:root[data-theme="light"] .btn.icon {
+  background: #ffffff;
+  border-color: var(--line-2);
+  color: var(--dim);
+}
+:root[data-theme="light"] .btn.icon:hover {
+  background: var(--bg3);
+  border-color: #d0d0d6;
+  color: var(--text);
+}
+:root[data-theme="light"] .btn.icon svg { opacity: 1; }
+
+/* ------------------------------------------------ media / track divider */
+
+.media-resizer {
+  position: absolute; left: 0; right: 0; bottom: -3px; height: 7px;
+  cursor: row-resize; z-index: 6; background: transparent;
+}
+.media-resizer::after {
+  content: ""; position: absolute; left: 50%; top: 3px;
+  width: 42px; height: 3px; transform: translateX(-50%);
+  border-radius: 2px; background: var(--line-2);
+  opacity: 0; transition: opacity .15s;
+}
+.media-panel { position: relative; }
+.media-resizer:hover::after, .media-resizer.active::after { opacity: 1; }
+body.resizing-media { cursor: row-resize; user-select: none; }
+
+/* ============================================================
+   三列顶栏布局 + 视频内嵌字幕
+   ============================================================ */
+
+/* --- 视频内嵌字幕：挂在画面上，跟随字幕设置 ---
+   The overlay is a sibling of .media-host, not a child: mountMedia() replaces
+   the host's innerHTML when switching projects and would delete it. */
+.media-stage { position: relative; flex: 1; min-height: 0; display: flex; }
+.media-stage .media-host { flex: 1; }
+.media-host { position: relative; }
+.video-overlay {
+  position: absolute; left: 0; right: 0; bottom: 6%;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 0 5%; pointer-events: none; z-index: 3;
+  text-align: center;
+}
+.video-overlay:empty, .video-overlay.hidden { display: none; }
+.overlay-text, .overlay-translation {
+  display: inline-block; max-width: 100%;
+  padding: 2px 10px; border-radius: 6px;
+  background: rgba(0,0,0,.62);
+  color: #fff; line-height: 1.4;
+  text-shadow: 0 1px 3px rgba(0,0,0,.85);
+  -webkit-text-stroke: .2px rgba(0,0,0,.5);
+}
+.overlay-text { font-size: 21px; font-weight: 600; }
+.overlay-translation { font-size: 15px; color: rgba(255,255,255,.88); font-weight: 400; }
+.overlay-text:empty, .overlay-translation:empty { display: none; }
+/* 纯白主题：字幕底衬保持一致的黑，画面内容不随主题变 */
+:root[data-theme="light"] .overlay-text,
+:root[data-theme="light"] .overlay-translation { background: rgba(0,0,0,.68); }
+
+/* --- 媒体列：按画面比例锁宽，避免又是横向留黑 --- */
+.media-panel { min-width: 0; }
+.media-host { min-height: 0; }
+
+/* --- 角色列表：紧凑单行，5 个角色不再需要滚动 --- */
+.role-summary { gap: 2px; }
+.side-body { gap: 10px; }
+.side-group.detect-group .note-list { max-height: 76px; }
+.role-chip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 6px; border-radius: 6px;
+  font-size: 12px; line-height: 1.35; min-width: 0;
+  background: transparent; border: none; cursor: pointer;
+}
+.role-chip:hover { background: var(--bg2); }
+.role-chip b {
+  font-weight: 500; flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.role-chip .pill { flex: none; font-variant-numeric: tabular-nums; }
+
+.detect-notes summary {
+  cursor: pointer; font-size: 11.5px; color: var(--muted);
+  padding: 3px 0; list-style: none;
+}
+.detect-notes summary::-webkit-details-marker { display: none; }
+.detect-notes summary::before { content: "▸ "; }
+.detect-notes[open] summary::before { content: "▾ "; }
+.detect-notes .note-list { max-height: 96px; overflow: auto; margin-top: 4px; }
+
+/* --- 当前字幕列：人物按钮两列网格，消除横向滚动 --- */
+.cue-panel .cue-bar { flex-direction: column; gap: 10px; padding: 11px 14px; }
+.cue-panel .cue-assign {
+  width: auto; border-left: none; padding-left: 0;
+  border-top: 1px solid var(--line); padding-top: 10px;
+}
+.speaker-buttons {
+  /* Wide enough for a 5-glyph name plus swatch and hotkey, so labels never wrap. */
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 6px; overflow: visible;
+}
+.speaker-btns-scroll { display: contents; }
+.speaker-btn {
+  justify-content: flex-start;
+  white-space: nowrap; overflow: hidden;
+  padding: 0 9px; gap: 6px; font-size: 12px;
+}
+.speaker-btn .key { margin-left: auto; }
+.cue-panel .current-text { font-size: 17px; line-height: 1.4; }
+
+/* --- The timeline content is inset by a gutter; speaker labels sit in that
+   gutter (negative offset) so they can never be painted over the first cues. --- */
+.track-lanes, .track-main, .ruler {
+  margin-left: var(--lane-gutter, 0px);
+  width: auto;
+}
+:root { --lane-gutter: 0px; }
+.lane-label {
+  left: calc(-1 * var(--lane-gutter, 0px));
+  width: var(--lane-gutter, auto);
+  justify-content: flex-start;
+  padding-left: 2px;
+  background: linear-gradient(90deg, var(--bg1) 78%, transparent);
+}
+.lane { overflow: visible; }
+.track-lanes { overflow: visible; }
+
+/* --- 清单：行高收紧，同高度多显示两行 --- */
+.queue-item { padding: 5px 14px; }
+
+/* --- 窄窗口回退为单列纵向堆叠 --- */
+@media (max-width: 1240px) {
+  .workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto minmax(140px, 1fr);
+    grid-template-areas: "media" "cue" "side" "track" "queue";
+  }
+  .speaker-buttons { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* Tools that operate on the current cue / selection live with the assignment
+   controls, not in the speaker library column. */

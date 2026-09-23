@@ -1,0 +1,21 @@
+# 专业检测引擎（推荐，一次装齐）
+# pyannote.audio 3.x / 4.x 都支持：4.x 用 wespeaker 声纹，且不再依赖 torchcodec 读文件
+torch>=2.6
+torchaudio
+pyannote.audio>=3.1
+funasr
+modelscope
+addict
+simplejson
+datasets
+hdbscan
+
+# 可选：ASR 转录（无字幕时生成字幕用）
+# faster-whisper
+
+# 可选：桌面版原生窗口（启动桌面版.bat / desktop_pywebview.py 需要）
+# 打包：pyinstaller
+# pywebview
+
+# 可选：外挂引擎（如 Sortformer）隔离环境由 uv 创建，见 scripts/setup_engine.py
+# uv

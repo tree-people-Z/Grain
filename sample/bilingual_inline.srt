@@ -1,0 +1,14 @@
+1
+00:00:00,000 --> 00:00:03,200
+你好，欢迎来到这次的访谈节目。
+Hello and welcome to this interview.
+
+2
+00:00:03,550 --> 00:00:06,350
+谢谢，很高兴能在这里聊聊。
+Thanks, glad to be here.
+
+3
+00:00:06,700 --> 00:00:09,300
+那我们直接进入第一个问题。
+Let's jump straight into the first question.

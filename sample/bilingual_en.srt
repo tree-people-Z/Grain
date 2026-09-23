@@ -1,0 +1,11 @@
+1
+00:00:00,050 --> 00:00:03,180
+Hello and welcome to this interview.
+
+2
+00:00:03,600 --> 00:00:06,300
+Thanks, glad to be here.
+
+3
+00:00:06,750 --> 00:00:09,250
+Let's jump straight into the first question.

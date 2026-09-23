@@ -1,0 +1,33 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- 运行时数据：项目、导出、work、设置、HF token（含隐私，勿提交）---
+data/*
+!data/.gitkeep
+
+# --- 外挂引擎的隔离环境（由 scripts/setup_engine.py 创建，体积大，勿提交）---
+engines/*/.venv/
+.venv/
+venv/
+env/
+
+# --- 打包产物 ---
+build/
+dist/
+
+# --- 日志 / 临时文件 ---
+*.log
+*.tmp
+
+# --- 操作系统 / 编辑器 / 工具 ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.zcodeignore
+.vscode/
+.idea/
