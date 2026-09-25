@@ -29,9 +29,10 @@ const state = {
   project: null,
   projectId: null,
   selectedId: null,
+  queueFilter: "all",
+  detectTimer: null,
+  queueCache: null,
   selection: new Set(),
-  filter: "all",
-  search: "",
   zoom: 1,
   pxPerSecond: 60,
   viewStart: 0,
@@ -48,6 +49,7 @@ const state = {
   drag: null,           // active track gesture descriptor
   scrubbing: false,     // true while the ruler is being dragged
   seekTarget: null,     // coalesced scrub target (applied once per frame)
+  pendingSeek: null,    // seek to apply once media metadata is ready
   laneCache: null,      // reused lane DOM, rebuilt only when the lanes change
   waveCache: null,      // offscreen waveform strip, re-sliced instead of resampled
   blockNodes: new Map(),// id -> reused clip node, so a gesture never rebuilds the DOM
@@ -56,7 +58,7 @@ const state = {
   segById: new Map(),   // id -> segment hash map for O(1) lookup
   laneGroupsCache: null,// {project, groups}: rebuilt only when the project changes
   speakerUi: null,      // cached speaker-button DOM, only active classes update
-  cssVars: null,        // cached :root custom properties (theme changes rarely)
+  cssVars: null,        // cached :root custom properties (dark-only: never changes)
 };
 
 const el = (id) => document.getElementById(id);
@@ -82,77 +84,22 @@ const minZoomFor = (width, duration) => Math.min(ZOOM_MIN, zoomForPps(fitPps(wid
 
 /* ----------------------------------------------------------- ui prefs */
 
-const PREFS_KEY = "ssp.prefs.v1";
+const PREFS_KEY = "ssp.prefs.v3";   // v1/v2 stored dead prefs (theme, loop, rate…)
 const prefs = Object.assign({
-  theme: "dark",        // dark | light | auto
-  accent: "violet",     // violet | blue | rose | green
-  autonext: true,
-  loop: false,
-  follow: true,
-  zoom: 1,
-  rate: 1,
-  showKbd: true,
-  lang: "both",         // primary | both | translation
-  snap: true,           // snap the playhead to cue edges
+  autonext: true,       // jump to the next cue after an assignment (toggleable)
+  follow: true,         // viewport follows the playhead while playing (toggleable)
+  snap: true,           // snap the playhead to cue edges (S key)
   mediaRows: null,      // user-dragged media pane height (null = automatic)
-  overlay: true,        // burn subtitles onto the video
 }, JSON.parse(localStorage.getItem(PREFS_KEY) || "{}"));
 
 function savePrefs() {
   localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
 }
 
-function applyTheme() {
-  const root = document.documentElement;
-  const theme = prefs.theme === "auto"
-    ? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
-    : prefs.theme;
-  root.dataset.theme = theme;
-  root.dataset.accent = prefs.accent;
-  state.cssVars = null;  // theme/accent changed: the cached custom props are stale
-}
-
-/* Toggle straight to the opposite of what is currently on screen. */
-function toggleTheme() {
-  const current = document.documentElement.dataset.theme;
-  prefs.theme = current === "light" ? "dark" : "light";
-  savePrefs();
-  applyTheme();
-  setMessage(prefs.theme === "dark" ? "已切换到深色" : "已切换到浅色");
-}
-
-/* --------------------------------------------------------- window controls */
-/* The desktop shell is frameless (no OS title bar), so min / max / close are
-   our own buttons in the top toolbar. They only work under pywebview, which
-   injects `window.pywebview` and fires `pywebviewready` once the bridge is up;
-   in a plain browser the buttons stay hidden. */
-function wireWindowControls() {
-  const apply = () => {
-    if (!window.pywebview?.api) return;
-    document.body.classList.add("desktop-shell");
-    el("win-min")?.addEventListener("click", () => window.pywebview.api.window_minimize());
-    el("win-max")?.addEventListener("click", () => window.pywebview.api.window_maximize());
-    el("win-close")?.addEventListener("click", () => window.pywebview.api.window_close());
-  };
-  if (window.pywebview?.api) apply();
-  else window.addEventListener("pywebviewready", apply, { once: true });
-}
-
-/* The whole toolbar is a pywebview drag region, so the shell must not treat a
-   press on one of its controls as a window drag. Stopping the mousedown before
-   it bubbles to the shell's body listener keeps buttons / selects clickable. */
-function wireToolbarDrag() {
-  const toolbar = document.querySelector(".toolbar");
-  if (!toolbar) return;
-  toolbar.querySelectorAll("button, select, input, a").forEach((node) => {
-    node.addEventListener("mousedown", (event) => event.stopPropagation());
-  });
-}
-
 /* Choose the initial zoom and scroll position for the timeline. Short media fits
-   the whole span; long media opens at the user's default zoom, scrolled to where
-   the dialogue actually starts, so a silent cold-open is not shown. Only called
-   when a project is mounted — tweaking a preference must never reset the view. */
+   the whole span; long media opens at the default zoom, scrolled to where the
+   dialogue actually starts, so a silent cold-open is not shown. Only called when
+   a project is mounted — tweaking a preference must never reset the view. */
 function initTimelineView() {
   const outer = document.querySelector(".track-outer");
   if (!outer || !state.project) return;
@@ -164,7 +111,7 @@ function initTimelineView() {
     renderTrack();
     return;
   }
-  state.zoom = clamp(prefs.zoom || 1, minZoomFor(width, duration), 4);
+  state.zoom = clamp(1, minZoomFor(width, duration), 4);
   state.pxPerSecond = ppsForZoom(state.zoom, width);
   // Open on the content, not on a silent leader: park the playhead at the first
   // cue (Premiere keeps the playhead visible when a sequence opens, and this
@@ -173,7 +120,8 @@ function initTimelineView() {
   const firstStart = cues.length ? cues[0].start : 0;
   const visible = width / state.pxPerSecond;
   if (state.media && firstStart > 0.5) {
-    state.media.currentTime = firstStart;
+    if (state.media.readyState >= 1) state.media.currentTime = firstStart;
+    else state.pendingSeek = firstStart;
   }
   // Park the playhead at the same ratio follow-play will hold it at, so starting
   // playback does not immediately slide the view.
@@ -182,25 +130,22 @@ function initTimelineView() {
   renderTrack();
 }
 
-/* Apply the "默认缩放" preference to the current view without touching playback
-   position (the settings slider calls this instead of a full timeline reset). */
+/* Reset the view to the default zoom without touching playback position (call
+   this instead of a full timeline reset). */
 function applyDefaultZoom() {
   if (!state.project) return;
   const width = trackGeom().width;
   const duration = state.project.duration || 1;
-  state.zoom = clamp(prefs.zoom || 1, minZoomFor(width, duration), ZOOM_MAX);
+  state.zoom = clamp(1, minZoomFor(width, duration), ZOOM_MAX);
   state.pxPerSecond = ppsForZoom(state.zoom, width);
   state.viewStart = clamp(state.viewStart, 0, Math.max(0, duration - width / state.pxPerSecond));
   renderTrack();
 }
 
 function applyPrefsToWorkspace() {
-  const autonext = el("chk-autonext"), loop = el("chk-loop"), follow = el("chk-follow");
+  const autonext = el("chk-autonext"), follow = el("chk-follow");
   if (autonext) autonext.checked = prefs.autonext;
-  if (loop) loop.checked = prefs.loop;
   if (follow) { follow.checked = prefs.follow; state.following = prefs.follow; }
-  if (state.media) state.media.playbackRate = prefs.rate;
-  document.body.classList.toggle("hide-kbd", !prefs.showKbd);
 }
 
 function fmtTime(seconds, withMs = false) {
@@ -255,8 +200,8 @@ function buildSegmentIndex() {
 }
 
 /* Cached :root custom properties. `getComputedStyle` forces a style recalc;
-   calling it on every render frame was measurable, and the theme changes only
-   on an explicit toggle (which clears this cache via `applyTheme`). */
+calling it on every render frame was measurable. The stylesheet is static
+(dark-only), so the cache never needs invalidating. */
 function cssVars() {
   if (state.cssVars) return state.cssVars;
   const root = getComputedStyle(document.documentElement);
@@ -271,15 +216,32 @@ function cssVars() {
 
 function currentSegments() {
   if (!state.project) return [];
-  let items = state.project.segments;
-  if (state.filter === "pending") items = items.filter((s) => s.speaker_id === null);
-  else if (state.filter === "manual") items = items.filter((s) => s.status === "manual");
-  else if (state.filter === "low") items = items.filter((s) => s.confidence !== null && s.confidence < 0.6);
-  if (state.search) {
-    const needle = state.search.toLowerCase();
-    items = items.filter((s) => (s.text || "").toLowerCase().includes(needle));
+  return state.project.segments;
+}
+
+const NEEDS_REVIEW_BELOW = 0.85;
+function needsReview(seg) {
+  return seg.speaker_id === null || (seg.status === "auto"
+    && (seg.ambiguous || (seg.confidence != null && seg.confidence < NEEDS_REVIEW_BELOW)));
+}
+
+function reviewReason(seg) {
+  if (seg.speaker_id === null) return seg.note || (seg.cluster != null ? "聚类未映射或时间匹配不足" : "未匹配说话人");
+  if (seg.ambiguous) return "多人争议";
+  if (seg.confidence != null && seg.confidence < NEEDS_REVIEW_BELOW) {
+    return `时间匹配 ${(seg.confidence * 100).toFixed(0)}%`;
   }
-  return items;
+  return "";
+}
+
+function filteredSegments() {
+  const segments = currentSegments();
+  switch (state.queueFilter) {
+    case "pending": return segments.filter((seg) => seg.speaker_id === null);
+    case "review": return segments.filter(needsReview);
+    case "manual": return segments.filter((seg) => seg.status === "manual");
+    default: return segments;
+  }
 }
 
 function speakerColor(seg) {
@@ -344,8 +306,11 @@ async function assign(segmentId, speakerId) {
       segment_id: segmentId, speaker_id: speakerId,
     });
     pushUndo(snap);
-    applyProject(data.project);
-    if (prefs.autonext) goToSegment(segmentId, +1);
+    applySegmentChanges(data);
+    if (prefs.autonext) {
+      if (state.queueFilter === "review" || state.queueFilter === "pending") nextReviewFrom(segmentId);
+      else goToSegment(segmentId, +1);
+    }
   } catch (err) {
     setMessage(err.message);
   }
@@ -359,11 +324,22 @@ async function assignMany(ids, speakerId) {
       ids, speaker_id: speakerId,
     });
     pushUndo(snap);
-    applyProject(data.project);
+    applySegmentChanges(data);
     setMessage(`已批量归属 ${data.changed} 条字幕`, "ok");
   } catch (err) {
     setMessage(err.message);
   }
+}
+
+function applySegmentChanges(data) {
+  const changes = new Map(data.segments.map((segment) => [segment.id, segment]));
+  const project = {
+    ...state.project,
+    stats: data.stats,
+    segments: state.project.segments.map((segment) =>
+      changes.has(segment.id) ? { ...segment, ...changes.get(segment.id) } : segment),
+  };
+  applyProject(project);
 }
 
 function onSpeakerClick(speakerId) {
@@ -380,20 +356,25 @@ function onSpeakerClick(speakerId) {
 
 function applyProject(project) {
   if (!project) { setMessage("项目数据加载失败"); return; }
-  const prevMediaPath = state.project?.media_path;
   const changedProject = state.projectId !== project.id;
   // renderAll() mounts the media element itself when it creates the workspace,
   // so remember that here and skip the remount below (it used to load the file
   // and fetch peaks twice on the first project).
   const stageWasEmpty = el("stage")?.classList.contains("empty");
+  // Detach the old media before rendering the new project's cue state. The
+  // two projects may point at the same source path, so comparing paths is not
+  // enough to decide whether the media element needs to be replaced.
+  if (changedProject) detachMedia();
   state.project = project;
   state.projectId = project.id;
+  state.queueCache = null;
   // Reused-node caches are keyed on this project's cue ids, turns and roles: a
   // different project (or a re-run detection) must start them from scratch.
   if (changedProject) {
     state.blockNodes = new Map();
     state.laneCache = null;
     state.seekTarget = null;
+    state.pendingSeek = null;
     state.speakerUi = null;
   }
   // Indexes and the lane-group cache depend on this exact project object. Every
@@ -409,9 +390,43 @@ function applyProject(project) {
   // Switching projects must swap the media element too — otherwise the old
   // file keeps playing under the new project's timeline. Zoom is also reset
   // per project (fit for short media), so stale zoom never squashes the view.
-  if (!stageWasEmpty && prevMediaPath !== project.media_path && document.querySelector(".workspace")) {
+  if (!stageWasEmpty && changedProject && document.querySelector(".workspace")) {
     mountMedia();
     applyPrefsToWorkspace();
+    renderVideoOverlay();
+  }
+  if (changedProject) syncDetectJob(project.id);
+}
+
+async function syncDetectJob(projectId) {
+  if (state.detectTimer) clearTimeout(state.detectTimer);
+  state.detectTimer = null;
+  try {
+    const { job } = await API.get(`/api/projects/${projectId}/detect/status`);
+    if (state.projectId !== projectId) return;
+    if (job.state === "running") {
+      setBusy(job.stage || "检测中");
+      state.detectTimer = setTimeout(() => syncDetectJob(projectId), 1200);
+    } else if (job.state === "done") {
+      setBusy("");
+      const data = await API.get(`/api/projects/${projectId}`);
+      if (state.projectId === projectId) {
+        applyProject(data.project);
+        setMessage("检测完成", "ok");
+        if (data.project.mapping_pending) openMappingModal();
+        else {
+          const first = data.project.segments.find(needsReview);
+          if (first) selectSegment(first.id, true);
+        }
+      }
+    } else if (job.state === "failed") {
+      setBusy("");
+      setMessage(job.error || "检测失败，可重新运行");
+    } else {
+      setBusy("");
+    }
+  } catch (err) {
+    if (state.projectId === projectId) setMessage(err.message);
   }
 }
 
@@ -436,7 +451,7 @@ function renderSide() {
     roleHost.innerHTML = "";
     const roles = project.roles || [];
     if (!roles.length) {
-      roleHost.innerHTML = '<div class="hint">还没有角色。点「+ 新增」创建角色，检测匹配上后会自动归属。</div>';
+      roleHost.innerHTML = '<div class="hint">还没有角色。直接运行检测会按聚类自动创建角色（灰色待定，可重命名）；也可点「+ 新增」手动创建。</div>';
     }
     // One tally pass instead of a full scan per role (1904 cues x N roles).
     const counts = new Map();
@@ -447,7 +462,7 @@ function renderSide() {
     for (const role of roles) {
       const chip = document.createElement("div");
       chip.className = "role-chip";
-      chip.title = `${role.name} — ${counts.get(role.id) || 0} 条${role.has_voiceprint ? "（有声纹）" : ""}`;
+      chip.title = `${role.name} — ${counts.get(role.id) || 0} 条`;
       chip.innerHTML = `<span class="swatch" style="background:${role.color}"></span>
         <b>${escapeHtml(role.name)}</b>
         <span class="pill">${counts.get(role.id) || 0}</span>`;
@@ -461,17 +476,17 @@ function renderSide() {
     const notes = project.detection_notes || [];
     const engineLabels = {};
     for (const [key, info] of Object.entries(state.meta?.engines || {})) engineLabels[key] = info.label;
-    // Only the two numbers that drive the review loop stay expanded; engine,
-    // cluster count and the detector's notes live one click away.
+    // Assigned / pending counts live in the status bar; the sidebar keeps only the
+    // detector's own facts, one click away behind "检测详情".
     detectHost.innerHTML = `
-      <div class="row"><span>已归属</span><b>${project.stats.assigned} / ${project.stats.total}</b></div>
-      <div class="row"><span>待定</span><b>${project.stats.pending}</b></div>
+      ${project.mapping_pending ? '<button id="btn-map-clusters" class="btn primary sm">确认说话人</button>' : ""}
       <details class="detect-notes"><summary>检测详情</summary>
         <div class="row"><span>引擎</span><b>${escapeHtml(project.engine ? (engineLabels[project.engine] || project.engine) : "未运行")}</b></div>
         <div class="row"><span>聚类 / 说话人</span><b>${(project.turns || []).length} / ${project.stats.speakers_used}</b></div>
         ${notes.length ? `<ul class="note-list">${notes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")}</ul>` : ""}
       </details>
     `;
+    detectHost.querySelector("#btn-map-clusters")?.addEventListener("click", openMappingModal);
   }
 }
 
@@ -485,15 +500,26 @@ function renderProjectSelect() {
     opt.textContent = "（无项目）";
     opt.value = "";
     select.appendChild(opt);
-    return;
+  } else {
+    for (const item of options) {
+      const opt = document.createElement("option");
+      opt.value = item.id;
+      const stats = item.id === state.projectId ? state.project?.stats : item.stats;
+      const pct = stats?.total ? Math.round((stats.manual / stats.total) * 100) : 0;
+      opt.textContent = `${item.name} · 已复核 ${pct}%`;
+      if (item.id === state.projectId) opt.selected = true;
+      select.appendChild(opt);
+    }
   }
-  for (const item of options) {
-    const opt = document.createElement("option");
-    opt.value = item.id;
-    const pct = item.stats?.total ? Math.round((item.stats.assigned / item.stats.total) * 100) : 0;
-    opt.textContent = `${item.name} · ${pct}%`;
-    if (item.id === state.projectId) opt.selected = true;
-    select.appendChild(opt);
+  const manage = document.createElement("option");
+  manage.value = "__manage__";
+  manage.textContent = "＋ 打开项目库…";
+  select.appendChild(manage);
+  if (state.projectId) {
+    const remove = document.createElement("option");
+    remove.value = "__delete__";
+    remove.textContent = "删除当前视频与字幕…";
+    select.appendChild(remove);
   }
 }
 
@@ -502,10 +528,8 @@ function renderStats() {
   if (!stats) return;
   el("stat-total").textContent = String(stats.total);
   el("stat-assigned").textContent = String(stats.assigned);
+  el("stat-reviewed").textContent = String(stats.manual);
   el("stat-pending").textContent = String(stats.pending);
-  el("stat-roles").textContent = String(stats.roles);
-  el("stat-progress").textContent =
-    `${stats.total ? Math.round((stats.assigned / stats.total) * 100) : 0}%`;
 }
 
 /* Mount the workspace shell the first time it is shown. resetWorkspace() may
@@ -520,6 +544,25 @@ function renderWorkspace() {
   mountMedia();
 }
 
+function detachMedia() {
+  stopPlaybackLoop();
+  const media = state.media;
+  state.media = null;
+  state.pendingSeek = null;
+  state.seekTarget = null;
+  if (media) {
+    media.pause();
+    media.removeAttribute("src");
+    media.load();
+  }
+  const host = el("media-host");
+  if (host) host.replaceChildren();
+  const overlay = el("video-overlay");
+  const textNode = el("overlay-text");
+  if (textNode) textNode.textContent = "";
+  overlay?.classList.add("hidden");
+}
+
 function mountMedia() {
   const host = el("media-host");
   if (!host || !state.project) return;
@@ -531,6 +574,7 @@ function mountMedia() {
   media.src = state.project.media_url;
   media.addEventListener("timeupdate", onTimeUpdate);
   media.addEventListener("play", () => {
+    if (state.media !== media) return;
     el("btn-play").textContent = "⏸";
     // Resuming playback re-enables follow-play per the user's preference.
     state.following = prefs.follow;
@@ -538,23 +582,35 @@ function mountMedia() {
     if (box) box.checked = prefs.follow;
     ensurePlaybackLoop();
   });
-  media.addEventListener("playing", ensurePlaybackLoop);
+  media.addEventListener("playing", () => {
+    if (state.media === media) ensurePlaybackLoop();
+  });
   media.addEventListener("pause", () => {
+    if (state.media !== media) return;
     el("btn-play").textContent = "▶";
     stopPlaybackLoop();
   });
   media.addEventListener("seeked", () => {
+    if (state.media !== media) return;
     renderPlaybackFrame();
     ensurePlaybackLoop();
   });
   media.addEventListener("loadedmetadata", () => {
+    if (state.media !== media) return;
     if (!state.project.duration) state.project.duration = media.duration;
+    // initTimelineView may have asked for a seek before the decoder was ready
+    // (browsers silently ignore currentTime assignments that early) — apply it.
+    if (state.pendingSeek != null) {
+      media.currentTime = state.pendingSeek;
+      state.pendingSeek = null;
+    }
     el("time-display").textContent =
       `${fmtTime(media.currentTime, true)} / ${fmtTime(state.project.duration || media.duration)}`;
     fitMediaPane(media, isAudio);
     renderTrack();
   });
   media.addEventListener("ended", () => {
+    if (state.media !== media) return;
     el("btn-play").textContent = "▶";
     stopPlaybackLoop();
   });
@@ -602,6 +658,7 @@ function fitMediaPane(media, isAudio) {
   if (!ratio) {
     // Audio has no picture: keep a compact strip for the native controls.
     document.documentElement.style.setProperty("--media-rows", "150px");
+    document.documentElement.style.setProperty("--media-natural", "420px");
     return;
   }
   const roomForMedia = window.innerHeight - OUTER - GAPS - reserved;
@@ -614,7 +671,7 @@ function fitMediaPane(media, isAudio) {
   document.documentElement.style.setProperty("--media-rows", `${Math.round(rows)}px`);
   const naturalWidth = Math.round((rows - CHROME) * ratio);
   const colWidth = clamp(naturalWidth, 330, Math.min(620, window.innerWidth * 0.42));
-  document.documentElement.style.setProperty("--media-col", `${colWidth}px`);
+  document.documentElement.style.setProperty("--media-natural", `${colWidth}px`);
 }
 
 /* Draggable divider between the media pane and the timeline. The two compete
@@ -666,8 +723,10 @@ function readPixelVar(name, fallback) {
 }
 
 async function loadPeaks() {
+  const projectId = state.projectId;
   try {
-    const data = await API.get(`/api/projects/${state.projectId}/peaks?buckets=1400`);
+    const data = await API.get(`/api/projects/${projectId}/peaks?buckets=1400`);
+    if (state.projectId !== projectId) return;
     state.peaks = data.peaks || [];
     state.waveCache = null; // peak set changed: rebuild the strip
     renderTrack();
@@ -678,21 +737,19 @@ function visibleSeconds() {
   return trackGeom().width / state.pxPerSecond;
 }
 
-/* Burn the current cue onto the picture. Reads the same cueText/cueTranslation
-   helpers as the panels, so the language toggle drives it too. */
+/* Burn the current cue onto the picture. Reads the same cueText helper as the
+   panels. */
 function renderVideoOverlay() {
   const box = el("video-overlay");
   const textNode = el("overlay-text");
-  const translationNode = el("overlay-translation");
-  if (!box || !textNode || !translationNode) return;
+  if (!box || !textNode) return;
   const seg = state.media ? segmentAtTime(state.media.currentTime) : null;
-  if (!seg || prefs.overlay === false) {
+  if (!seg) {
     box.classList.add("hidden");
     return;
   }
   box.classList.remove("hidden");
   textNode.textContent = cueText(seg);
-  translationNode.textContent = cueTranslation(seg);
 }
 
 /* The cue covering `time`, or null in a gap between cues. Binary search over
@@ -725,18 +782,8 @@ function segmentAtTime(time) {
   return null;
 }
 
-/* Which text to show for a cue, honouring the language toggle. */
 function cueText(seg) {
-  const primary = seg.text || "";
-  const translation = (seg.translation || "").trim();
-  if (prefs.lang === "translation") return translation || primary;
-  return primary;
-}
-
-function cueTranslation(seg) {
-  const translation = (seg.translation || "").trim();
-  if (!translation || prefs.lang !== "both") return "";
-  return translation;
+  return seg.text || "";
 }
 
 function renderRuler(canvas, ctx, width, viewStart, pps, duration, dpr, mono, accentColor,
@@ -788,28 +835,38 @@ function renderRuler(canvas, ctx, width, viewStart, pps, duration, dpr, mono, ac
   }
 }
 
-/* Group detected turns by the role they were mapped to (or by raw cluster). */
+/* Group detected turns by the role they were mapped to. Turns whose cluster maps
+   to no existing role (unmatched, or their role was deleted) do NOT each get a
+   row — they all share one "待定/未匹配" lane, so the track never grows without
+   bound and a deleted role's lane disappears. */
 function laneGroups() {
   const mapping = state.project.cluster_to_role || {};
   const roleById = new Map((state.project.roles || []).map((r) => [r.id, r]));
   const groups = new Map();
+  const unassigned = { key: "_unassigned", label: "待定 / 未匹配", color: "#98a0af",
+                       pending: true, spans: [] };
   for (const turn of state.project.turns || []) {
     const roleId = mapping[String(turn.cluster)];
-    const key = roleId == null ? `c${turn.cluster}` : `r${roleId}`;
+    const role = roleId == null ? null : roleById.get(roleId);
+    if (!role) {
+      unassigned.spans.push(turn);
+      continue;
+    }
+    const key = `r${role.id}`;
     let group = groups.get(key);
     if (!group) {
-      const role = roleId == null ? null : roleById.get(roleId);
       group = {
         key,
-        label: role ? role.name : `聚类 ${turn.cluster}`,
-        color: role ? role.color : "#98a0af",
-        pending: !role,
+        label: role.name,
+        color: role.color,
+        pending: role.type === "pending",
         spans: [],
       };
       groups.set(key, group);
     }
     group.spans.push(turn);
   }
+  if (unassigned.spans.length) groups.set(unassigned.key, unassigned);
   // Cues assigned by hand have no detected turn, so their role would otherwise
   // get no lane at all. Give every such role its own row, built from its cue
   // spans (one bar per cue) so the track shows where that speaker talks.
@@ -1059,24 +1116,47 @@ function buildBlockNode() {
   name.className = "tb-name";
   const text = document.createElement("div");
   text.className = "tb-text";
-  const translation = document.createElement("div");
-  translation.className = "tb-translation";
   const conf = document.createElement("span");
   conf.className = "tb-conf";
-  node.append(name, text, translation, conf);
-  node._parts = { name, text, translation, conf };
+  node.append(name, text, conf);
+  node._parts = { name, text, conf };
   return node;
 }
 
 /* Virtualised subtitle blocks, reusing nodes across frames: during a drag the
    visible window slides but the cue set barely changes, so creating thousands of
-   nodes per frame was pure waste (and the main source of the stutter). */
+   nodes per frame was pure waste (and the main source of the stutter).
+   Cues are reached through the start-sorted index (`segIndex`): binary-search the
+   last cue that starts at/below the window end, then walk back until a cue ends
+   before the window start — O(visible + few overlaps) instead of O(all cues). */
 function renderBlocks(container, viewStart, pps, width) {
   const cache = state.blockNodes;
   const windowStart = viewStart - 2, windowEnd = viewStart + width / pps + 2;
   const seen = new Set();
   const fragment = document.createDocumentFragment();
-  for (const seg of state.project.segments) {
+  const segments = state.project.segments;
+  const index = state.segIndex;
+  let items;
+  if (index && index.starts.length) {
+    // Largest index whose start <= windowEnd (search on `starts`).
+    const starts = index.starts;
+    let lo = 0, hi = starts.length - 1, pos = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (starts[mid] <= windowEnd) { pos = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    if (pos < 0) items = [];
+    else {
+      const sorted = index.sorted;
+      const slice = [];
+      for (let i = pos; i >= 0 && sorted[i].end >= windowStart; i -= 1) slice.push(sorted[i]);
+      items = slice.reverse();
+    }
+  } else {
+    items = segments;
+  }
+  for (const seg of items) {
     if (seg.end < windowStart || seg.start > windowEnd) continue;
     seen.add(seg.id);
     let node = cache.get(seg.id);
@@ -1090,7 +1170,6 @@ function renderBlocks(container, viewStart, pps, width) {
     node.style.left = `${(seg.start - viewStart) * pps}px`;
     node.style.width = `${blockWidth}px`;
     const tip = [speakerName(seg), cueText(seg)];
-    if (cueTranslation(seg)) tip.push(cueTranslation(seg));
     if (seg.confidence != null && seg.speaker_id !== null) {
       tip.push(`置信度 ${(seg.confidence * 100).toFixed(0)}%`);
     }
@@ -1112,7 +1191,7 @@ function renderBlocks(container, viewStart, pps, width) {
     node.classList.toggle("current", seg.id === state.selectedId);
     node.classList.toggle("selected", state.selection.has(seg.id));
     // Detail degrades with the block's width: a 0.8s cue can only carry a name
-    // and a truncated line, while a long cue has room for the translation too.
+    // and a truncated line.
     node.dataset.detail = blockWidth < 90 ? "min" : (blockWidth < 190 ? "mid" : "full");
     const parts = node._parts;
     const name = speakerName(seg);
@@ -1120,11 +1199,6 @@ function renderBlocks(container, viewStart, pps, width) {
     parts.name.style.color = color;
     const body = cueText(seg);
     if (parts.text.textContent !== body) parts.text.textContent = body;
-    const translationText = blockWidth >= 190 ? cueTranslation(seg) : "";
-    if (parts.translation.textContent !== translationText) {
-      parts.translation.textContent = translationText;
-    }
-    parts.translation.hidden = !translationText;
     // Confidence is a corner badge, never a text row competing with the cue.
     const showConf = seg.confidence !== null && seg.confidence !== undefined
       && seg.speaker_id !== null && seg.confidence < 0.9 && blockWidth >= 120;
@@ -1170,17 +1244,11 @@ function renderCurrent() {
   if (!textNode) return;
   if (!seg) { textNode.textContent = "—"; return; }
   textNode.textContent = cueText(seg);
-  const translationNode = el("current-translation");
-  const translation = cueTranslation(seg);
-  if (translationNode) {
-    translationNode.textContent = translation;
-    translationNode.hidden = !translation;
-  }
   el("current-range").textContent = `${fmtTime(seg.start, true)} → ${fmtTime(seg.end, true)}`;
   const badge = el("current-badge");
   const role = roleById(seg.speaker_id);
   const statusText = seg.status === "manual" ? "已人工复核"
-    : seg.status === "auto" ? `自动归属${seg.confidence != null ? ` · ${(seg.confidence * 100).toFixed(0)}%` : ""}`
+    : seg.status === "auto" ? `自动归属${seg.confidence != null ? ` · 时间匹配 ${(seg.confidence * 100).toFixed(0)}%` : ""}${seg.ambiguous ? " · 多人争议" : ""}`
       : "待定";
   badge.textContent = `${role ? role.name : "待定"} · ${statusText}`;
   badge.className = "badge " + (seg.status === "manual" ? "manual" : seg.status === "auto" ? "auto" : "");
@@ -1240,21 +1308,17 @@ function renameRole(roleId) {
   const role = roleById(roleId);
   if (!role) return;
   const cueCount = state.project.segments.filter((s) => s.speaker_id === roleId).length;
-  modal("命名说话人 · 该声纹有 " + cueCount + " 条字幕", (body) => {
+  modal("命名说话人 · 该角色有 " + cueCount + " 条字幕", (body) => {
     body.innerHTML = `
-      <p class="hint">给这个声纹起个名字。保存后，它的声纹会自动进入全局角色库，下次检测就能认出这个人。</p>
+      <p class="hint">给这个说话人起个名字。复核归属后即可用于导出。</p>
       <div class="field">
         <label>说话人名称</label>
         <input id="rename-input" type="text" value="${escapeHtml(role.type === "pending" ? "" : role.name)}"
                placeholder="例如：高松灯" autocomplete="off">
       </div>
-      <div class="field-row">
-        <div class="field"><label>颜色</label>
-          <input id="rename-color" type="color" value="${role.color}" style="height:34px;padding:2px">
-        </div>
-        <div class="field"><label>声纹</label>
-          <div class="pill">${role.has_voiceprint ? `已录入（${role.embedder || "builtin"}）` : "尚未录入"}</div>
-        </div>
+      <div class="field">
+        <label>颜色</label>
+        <input id="rename-color" type="color" value="${role.color}" style="height:34px;padding:2px">
       </div>
     `;
     setTimeout(() => body.querySelector("#rename-input")?.focus(), 30);
@@ -1271,14 +1335,11 @@ async function applyRename(roleId, close) {
   const role = roleById(roleId);
   const cueCount = state.project.segments.filter((s) => s.speaker_id === roleId).length;
   try {
-    // The backend registers a named role's voiceprint in the global library
-    // automatically, so no separate "入库" step is needed here.
     const data = await API.post(`/api/projects/${state.projectId}/roles_update`,
                                 { role_id: roleId, name, color });
     applyProject(data.project);
     await refreshMeta();
-    const library = role && role.has_voiceprint ? "，声纹已入库" : "（暂无可用声纹）";
-    setMessage(`已命名为「${name}」${library}，影响 ${cueCount} 条字幕`, "ok");
+    setMessage(`已命名为「${name}」，影响 ${cueCount} 条字幕`, "ok");
     close();
   } catch (err) {
     setMessage(err.message);
@@ -1291,10 +1352,30 @@ function escapeHtml(text) {
   ));
 }
 
-function renderQueue() {
+const QUEUE_ROW_HEIGHT = 44;
+function renderQueue(reveal = false) {
   const host = el("queue");
   if (!host) return;
-  const items = currentSegments();
+  if (!state.queueCache || state.queueCache.project !== state.project
+      || state.queueCache.filter !== state.queueFilter) {
+    const all = currentSegments();
+    state.queueCache = {
+      project: state.project, filter: state.queueFilter,
+      items: filteredSegments(),
+      counts: {
+        all: all.length,
+        pending: all.filter((seg) => seg.speaker_id === null).length,
+        review: all.filter(needsReview).length,
+        manual: all.filter((seg) => seg.status === "manual").length,
+      },
+    };
+  }
+  const { items, counts } = state.queueCache;
+  for (const button of document.querySelectorAll("#queue-filters button")) {
+    button.classList.toggle("active", button.dataset.filter === state.queueFilter);
+    button.textContent = `${{ all: "全部", pending: "待定", review: "需复核", manual: "已复核" }[button.dataset.filter]} ${counts[button.dataset.filter]}`;
+  }
+  el("queue-count").textContent = `${counts[state.queueFilter]} / ${counts.all}`;
   if (!items.length) {
     host.innerHTML = "";
     const empty = document.createElement("div");
@@ -1303,24 +1384,42 @@ function renderQueue() {
     host.appendChild(empty);
     return;
   }
+  const virtual = items.length > 250;
+  if (virtual && reveal) {
+    const index = items.findIndex((seg) => seg.id === state.selectedId);
+    if (index >= 0 && (index * QUEUE_ROW_HEIGHT < host.scrollTop
+        || (index + 1) * QUEUE_ROW_HEIGHT > host.scrollTop + host.clientHeight)) {
+      host.scrollTop = Math.max(0, index * QUEUE_ROW_HEIGHT - host.clientHeight / 2);
+    }
+  }
+  const visibleRows = Math.ceil((host.clientHeight || 440) / QUEUE_ROW_HEIGHT) + 16;
+  const start = virtual ? Math.max(0, Math.min(items.length - visibleRows,
+    Math.floor(host.scrollTop / QUEUE_ROW_HEIGHT) - 8)) : 0;
+  const end = virtual ? Math.min(items.length, start + visibleRows) : items.length;
   // Rows are keyed by cue id and refilled in place. Rebuilding the whole list on
   // every highlight change is what made selection feel sluggish, and it also
   // threw away the scroll position under the pointer.
   const existing = new Map();
   for (const row of host.querySelectorAll(".queue-item")) existing.set(Number(row.dataset.id), row);
-  const reused = new Set();
-  const nodes = items.map((seg) => {
+  const nodes = items.slice(start, end).map((seg) => {
     let row = existing.get(seg.id);
     if (!row) row = buildQueueRow(seg);
-    else reused.add(seg.id);
     updateQueueRow(row, seg);
     return row;
   });
-  const sameSet = reused.size === existing.size && nodes.length === existing.size
-    && nodes.every((row, i) => host.children[i] === row);
-  if (sameSet) return; // same rows, same order: the in-place update was enough
+  const currentRows = [...host.querySelectorAll(".queue-item")];
+  const windowKey = `${start}:${end}:${items.length}`;
+  if (host.dataset.window === windowKey && nodes.length === currentRows.length
+      && nodes.every((row, i) => row === currentRows[i])) return;
   const scrollTop = host.scrollTop;
-  host.replaceChildren(...nodes);
+  if (virtual) {
+    const before = document.createElement("div");
+    const after = document.createElement("div");
+    before.style.height = `${start * QUEUE_ROW_HEIGHT}px`;
+    after.style.height = `${(items.length - end) * QUEUE_ROW_HEIGHT}px`;
+    host.replaceChildren(before, ...nodes, after);
+  } else host.replaceChildren(...nodes);
+  host.dataset.window = windowKey;
   host.scrollTop = scrollTop;
 }
 
@@ -1351,17 +1450,9 @@ function updateQueueRow(row, seg) {
   primaryLine.className = "q-line";
   primaryLine.textContent = cueText(seg);
   row._text.appendChild(primaryLine);
-  const translation = cueTranslation(seg);
-  if (translation) {
-    const translationLine = document.createElement("span");
-    translationLine.className = "q-line translation";
-    translationLine.textContent = translation;
-    row._text.appendChild(translationLine);
-  }
   row._status.textContent = seg.status === "manual" ? "已复核"
-    : seg.status === "auto"
-      ? (seg.confidence != null && seg.confidence < 0.9 ? `${(seg.confidence * 100).toFixed(0)}%` : "自动")
-      : "待定";
+    : reviewReason(seg) || "自动";
+  row.classList.toggle("needs-review", needsReview(seg));
 }
 
 /* Build one clip-list row, wiring its click once; content is filled by
@@ -1418,7 +1509,7 @@ function selectSegment(id, seek) {
         Math.max(0, duration - width / state.pxPerSecond));
     }
   }
-  renderCurrent(); renderTrack(); renderQueue(); renderVideoOverlay();
+  renderCurrent(); renderTrack(); renderQueue(true); renderVideoOverlay();
   const row = document.querySelector(".queue-item.current");
   if (row) row.scrollIntoView({ block: "nearest" });
 }
@@ -1433,12 +1524,22 @@ function goToSegment(id, offset) {
 function nextPending() {
   const segments = state.project.segments;
   const start = segments.findIndex((s) => s.id === state.selectedId);
-  const pending = (s) => s.speaker_id === null;
+  const pending = needsReview;
   for (let step = 1; step <= segments.length; step += 1) {
     const seg = segments[(start + step) % segments.length];
     if (pending(seg)) { selectSegment(seg.id, true); return; }
   }
-  setMessage("没有待定字幕了 🎉", "ok");
+  setMessage("没有需要复核的字幕了", "ok");
+}
+
+function nextReviewFrom(id) {
+  const segments = state.project.segments;
+  const index = segments.findIndex((seg) => seg.id === id);
+  for (let step = 1; step <= segments.length; step += 1) {
+    const seg = segments[(index + step) % segments.length];
+    if (needsReview(seg)) { selectSegment(seg.id, true); return; }
+  }
+  setMessage("没有需要复核的字幕了", "ok");
 }
 
 let trackRenderQueued = false;
@@ -1506,20 +1607,15 @@ function stopPlaybackLoop() {
   }
 }
 
-function onTimeUpdate() {
+function onTimeUpdate(event) {
   const media = state.media;
+  if (event?.currentTarget && event.currentTarget !== media) return;
   if (!media || !state.project) return;
 
   const seg = segmentAtTime(media.currentTime);
   if (seg && seg.id !== state.selectedId) {
     state.selectedId = seg.id;
     renderCurrent(); syncQueueSelection();
-  }
-  if (prefs.loop && !state.busy) {
-    const active = seg ? seg : state.project.segments.find((s) => s.id === state.selectedId);
-    if (active && media.currentTime >= active.end - 0.03) {
-      media.currentTime = active.start;
-    }
   }
   // Render once here (covers paused seeks) and let the rAF loop own the smooth
   // per-frame updates during playback.
@@ -1839,6 +1935,7 @@ function bindGlobalListeners() {
       if (!state.project) return;
       fitMediaPane(state.media, state.project.media_kind === "audio");
       renderTrack();
+      renderQueue();
     });
   });
 
@@ -1846,6 +1943,29 @@ function bindGlobalListeners() {
 }
 
 function bindWorkspace() {
+  document.querySelector(".mobile-panels")?.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-panel]");
+    if (!button) return;
+    const workspace = button.closest(".workspace");
+    workspace.dataset.mobilePanel = button.dataset.panel;
+    for (const item of workspace.querySelectorAll(".mobile-panels button")) {
+      item.classList.toggle("active", item === button);
+    }
+    renderQueue();
+  });
+  let queueScrollQueued = false;
+  el("queue")?.addEventListener("scroll", () => {
+    if (queueScrollQueued) return;
+    queueScrollQueued = true;
+    requestAnimationFrame(() => { queueScrollQueued = false; renderQueue(); });
+  });
+  el("queue-filters")?.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-filter]");
+    if (!button) return;
+    state.queueFilter = button.dataset.filter;
+    el("queue").scrollTop = 0;
+    renderQueue();
+  });
   bindTrack();
   wireMediaResizer();
   applyPrefsToWorkspace();
@@ -1855,35 +1975,25 @@ function bindWorkspace() {
   });
   el("btn-zoom-in").addEventListener("click", () => zoomAt(trackCenterX(), ZOOM_IN));
   el("btn-zoom-out").addEventListener("click", () => zoomAt(trackCenterX(), ZOOM_OUT));
-  const fitBtn = el("btn-zoom-fit");
-  if (fitBtn) fitBtn.addEventListener("click", fitToWidth);
-  bindLanguageToggle();
+  el("zoom-label")?.addEventListener("click", fitToWidth);
   el("chk-follow").addEventListener("change", (e) => {
     state.following = e.target.checked;
     prefs.follow = e.target.checked; savePrefs();
     renderTrack();
   });
-  if (state.media) state.media.playbackRate = prefs.rate;
+  const autonext = el("chk-autonext");
+  if (autonext) autonext.addEventListener("change", (e) => {
+    prefs.autonext = e.target.checked; savePrefs();
+    setMessage(e.target.checked ? "归属后自动跳下一句" : "归属后停留在当前句", "ok");
+  });
   // Rubber-band selection is the default gesture on empty track space, so the
   // old modal "框选" toggle is gone. Snap / jump-to-pending / undo / redo have
   // keyboard shortcuts (S / P / Ctrl+Z / Ctrl+Y) and no buttons.
 
-  document.querySelectorAll(".chip").forEach((chip) => {
-    chip.addEventListener("click", () => {
-      document.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
-      chip.classList.add("active");
-      state.filter = chip.dataset.filter;
-      renderQueue();
-    });
+  el("btn-manage-roles")?.addEventListener("click", () => {
+    if (!state.project) { setMessage("请先导入项目"); return; }
+    openRoleManager();
   });
-  // Filtering re-scans every cue and re-builds the list, so debounce keystrokes.
-  let searchTimer = null;
-  el("search").addEventListener("input", (e) => {
-    state.search = e.target.value;
-    if (searchTimer) clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => { searchTimer = null; renderQueue(); }, 120);
-  });
-
 }
 
 /* Fit the whole duration into the visible content width. The resulting zoom may
@@ -1904,21 +2014,6 @@ function applyFitToWidth() {
   state.pxPerSecond = fitPps(width, duration);
   state.zoom = zoomForPps(state.pxPerSecond, width);
   state.viewStart = Math.max(0, (duration - width / state.pxPerSecond) / 2);
-}
-
-function bindLanguageToggle() {
-  const toggle = el("lang-toggle");
-  if (!toggle) return;
-  toggle.hidden = !state.project?.bilingual;
-  toggle.querySelectorAll("button").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.lang === prefs.lang);
-    btn.addEventListener("click", () => {
-      prefs.lang = btn.dataset.lang;
-      savePrefs();
-      toggle.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b === btn));
-      renderCurrent(); renderTrack(); renderQueue(); renderVideoOverlay();
-    });
-  });
 }
 
 function onKeyDown(event) {
@@ -2096,24 +2191,19 @@ function promptNewRole() {
   const name = window.prompt("新角色名称：");
   if (!name) return;
   API.post(`/api/projects/${state.projectId}/roles`, { name })
-    .then((data) => { applyProject(data.project); setMessage(`已新增角色「${name}」`, "ok"); })
+    .then((data) => {
+      applyProject(data.project);
+      setMessage(`已新增角色「${name}」`, "ok");
+    })
     .catch((err) => setMessage(err.message));
 }
 
 function openRoleManager() {
-  modal("角色管理", (body, close) => {
+  modal("角色管理", (body) => {
     const render = () => {
       const roles = state.project.roles || [];
-      const pending = roles.filter((r) => r.type === "pending");
-      const targetEngine = state.project.engine || state.meta?.settings?.default_engine || "";
-      const targetSpace = state.meta?.engines?.[targetEngine]?.space || "builtin";
-      const library = state.meta?.library || [];
       body.innerHTML = `
-        <p class="hint">重命名、改色、合并同一人的不同聚类，或把声纹写入全局角色库（跨项目复用）。</p>
-        <div class="role-actions">
-          <span class="hint">「待定角色」是旧版本检测遗留的聚类占位；命名后入库，或在此一键清理。</span>
-          <button id="purge-pending-btn" class="btn ghost sm danger"${pending.length ? "" : " disabled"}>清理全部待定角色${pending.length ? `（${pending.length}）` : ""}</button>
-        </div>
+        <p class="hint">重命名、改色、合并同一人的不同聚类。</p>
         <div class="file-list" id="role-list"></div>
         <div class="field-row">
           <div class="field"><label>新增角色</label><input id="new-role-name" type="text" placeholder="例如：张三"></div>
@@ -2126,18 +2216,17 @@ function openRoleManager() {
             .map((r) => `<option value="${r.id}">${escapeHtml(r.name)}</option>`).join("")}</select></div>
           <div class="field"><label>&nbsp;</label><button id="merge-btn">合并</button></div>
         </div>
-        <h2 style="all:unset;font-weight:600;font-size:13px;margin-top:6px">全局角色库</h2>
-        <div class="file-list" id="library-list"></div>
       `;
       const list = body.querySelector("#role-list");
       for (const role of roles) {
         const row = document.createElement("div");
         row.className = "role-row";
-        const reenroll = role.has_voiceprint && role.embedder && role.embedder !== targetSpace;
+        const manualCount = state.project.segments.filter((s) => s.speaker_id === role.id && s.status === "manual").length;
         row.innerHTML = `
           <div class="swatch" style="background:${role.color}" title="点击改色"></div>
-          <div><input type="text" value="${escapeHtml(role.name)}"><div class="meta">${role.type} · 字幕 ${state.project.segments.filter((s) => s.speaker_id === role.id).length} 条 · 样本 ${role.sample_count}${role.has_voiceprint ? ` · 有声纹（${role.embedder || "builtin"}）` : ""}${reenroll ? ` · <b class="warn-text">需重录</b>` : ""}</div></div>
+          <div><input type="text" value="${escapeHtml(role.name)}"><div class="meta">${role.type} · 字幕 ${state.project.segments.filter((s) => s.speaker_id === role.id).length} 条 · 人工 ${manualCount} 条</div></div>
           <div class="meta">${role.id}</div>
+          <button class="btn ghost sm voice-btn">${role.has_voiceprint ? "更新声纹" : "建立声纹"}</button>
           <button class="btn ghost sm danger del-btn">删除</button>
         `;
         const [swatch, nameInput] = [row.querySelector(".swatch"), row.querySelector("input")];
@@ -2156,15 +2245,40 @@ function openRoleManager() {
           API.del(`/api/projects/${state.projectId}/roles/${role.id}`)
             .then((d) => { applyProject(d.project); render(); });
         });
+        row.querySelector(".voice-btn").addEventListener("click", async () => {
+          const ids = state.project.segments
+            .filter((s) => s.speaker_id === role.id && s.status === "manual"
+              && s.end - s.start >= 0.8)
+            .slice(0, 20).map((s) => s.id);
+          if (ids.length < 2) {
+            setMessage(`「${role.name}」需要至少 2 条人工确认且超过 0.8 秒的字幕`);
+            return;
+          }
+          try {
+            setBusy(`正在建立「${role.name}」声纹…`);
+            const data = await API.post(`/api/projects/${state.projectId}/roles_voiceprint`, {
+              role_id: role.id, segment_ids: ids,
+            });
+            applyProject(data.project); render();
+            setMessage(`「${role.name}」声纹已更新（${ids.length} 条样本）`, "ok");
+          } catch (err) { setMessage(err.message); }
+          finally { setBusy(""); }
+        });
         list.appendChild(row);
       }
       if (!roles.length) list.innerHTML = '<div class="hint">还没有角色。先在“当前字幕”区点“+ 新增”。</div>';
 
-      body.querySelector("#new-role-btn").addEventListener("click", () => {
-        const name = body.querySelector("#new-role-name").value.trim();
+      const nameInput = body.querySelector("#new-role-name");
+      const addNewRole = () => {
+        const name = nameInput.value.trim();
         if (!name) return;
         API.post(`/api/projects/${state.projectId}/roles`, { name })
-          .then((d) => { applyProject(d.project); render(); });
+          .then((d) => { applyProject(d.project); render(); })
+          .catch((err) => setMessage(err.message));
+      };
+      body.querySelector("#new-role-btn").addEventListener("click", addNewRole);
+      nameInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") { event.preventDefault(); addNewRole(); }
       });
       body.querySelector("#merge-btn").addEventListener("click", () => {
         const source = Number(body.querySelector("#merge-source").value);
@@ -2173,35 +2287,6 @@ function openRoleManager() {
         API.post(`/api/projects/${state.projectId}/roles_merge`, { source_id: source, target_id: target })
           .then((d) => { applyProject(d.project); render(); setMessage("已合并", "ok"); });
       });
-
-      const purgeBtn = body.querySelector("#purge-pending-btn");
-      if (purgeBtn) {
-        purgeBtn.addEventListener("click", () => {
-          if (!pending.length) return;
-          if (!window.confirm(`删除全部 ${pending.length} 个待定角色？其字幕将回到未归属。`)) return;
-          API.post(`/api/projects/${state.projectId}/roles_delete_pending`, {})
-            .then((d) => {
-              applyProject(d.project); render();
-              setMessage(`已清理 ${d.removed} 个待定角色`, "ok");
-            })
-            .catch((err) => setMessage(err.message));
-        });
-      }
-
-      const libraryList = body.querySelector("#library-list");
-      libraryList.innerHTML = library.length ? "" : '<div class="hint">角色库为空。在角色上点“入库”即可注册声纹。</div>';
-      for (const entry of library) {
-        const row = document.createElement("div");
-        row.className = "file-item";
-        row.innerHTML = `<span class="dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${entry.color}"></span>
-          <strong>${escapeHtml(entry.name)}</strong>
-          <span class="pill">${entry.has_voiceprint ? "有声纹" : "无声纹"} · 样本 ${entry.sample_count}</span>
-          <span class="spacer"></span><button class="btn ghost sm danger">删除</button>`;
-        row.querySelector("button").addEventListener("click", () => {
-          API.del(`/api/library/${entry.library_id}`).then(async () => { await refreshMeta(); render(); });
-        });
-        libraryList.appendChild(row);
-      }
     };
     render();
   });
@@ -2209,11 +2294,79 @@ function openRoleManager() {
 
 /* -------------------------------------------------------------- detection */
 
+function openMappingModal() {
+  const project = state.project;
+  if (!project?.mapping_pending || !project.cluster_preview?.length) return;
+  modal("确认说话人", (body) => {
+    body.innerHTML = '<p class="hint">先试听每个聚类，再选择对应角色。未确认的聚类可保持待定；确认后才会批量归属字幕。</p>';
+    for (const cluster of project.cluster_preview) {
+      const row = document.createElement("div");
+      row.className = "cluster-review";
+      const title = document.createElement("b");
+      title.textContent = `聚类 ${cluster.cluster + 1} · ${cluster.turns} 段 · ${Math.round(cluster.seconds)} 秒`;
+      row.appendChild(title);
+      for (const sample of cluster.samples) {
+        const sampleRow = document.createElement("div");
+        sampleRow.className = "cluster-sample";
+        const play = document.createElement("button");
+        play.type = "button";
+        play.className = "btn icon sm";
+        play.title = `试听 ${fmtTime(sample.start)} 起的声音`;
+        play.textContent = "▶";
+        play.addEventListener("click", () => {
+          if (!state.media) return;
+          state.media.currentTime = sample.start;
+          state.media.play();
+          const media = state.media;
+          setTimeout(() => { if (state.media === media && media.currentTime <= sample.end + 0.5) media.pause(); },
+            Math.min(5000, Math.max(1000, (sample.end - sample.start) * 1000)));
+        });
+        const label = document.createElement("span");
+        label.textContent = `${fmtTime(sample.start)} ${sample.text || "（无对应字幕）"}`;
+        sampleRow.append(play, label);
+        row.appendChild(sampleRow);
+      }
+      const select = document.createElement("select");
+      select.className = "cluster-choice";
+      select.dataset.cluster = cluster.cluster;
+      select.add(new Option("保持待定", "pending"));
+      for (const role of project.roles) select.add(new Option(role.name, String(role.id)));
+      select.add(new Option("新建角色", "new"));
+      const suggested = project.cluster_to_role?.[String(cluster.cluster)];
+      if (suggested != null && project.roles.some((role) => role.id === suggested)) {
+        select.value = String(suggested);
+        select.title = "声纹建议，可试听后修改";
+      } else if (!project.roles.length) select.value = "new";
+      row.appendChild(select);
+      body.appendChild(row);
+    }
+    body.closest(".modal")?.classList.add("modal-wide");
+  }, [
+    { label: "稍后确认" },
+    { label: "应用映射", primary: true, onClick: async (close) => {
+      const choices = {};
+      for (const select of document.querySelectorAll(".cluster-choice")) {
+        choices[select.dataset.cluster] = select.value === "pending" ? null
+          : select.value === "new" ? "new" : Number(select.value);
+      }
+      try {
+        const data = await API.post(`/api/projects/${project.id}/mapping`, { choices });
+        close();
+        applyProject(data.project);
+        state.queueFilter = "review";
+        renderQueue();
+        const first = data.project.segments.find(needsReview);
+        if (first) selectSegment(first.id, true);
+        setMessage("说话人映射已应用", "ok");
+      } catch (err) { setMessage(err.message); }
+    } },
+  ]);
+}
+
 function openDetectModal() {
   const engines = state.meta.engines || {};
-  const cfg = state.meta.settings || {};
-  // Honour the configured default engine; fall back to the first available one.
-  let defaultEngine = cfg.default_engine || "campp";
+  // Default to pyannote; fall back to the first available engine.
+  let defaultEngine = "pyannote";
   if (!engines[defaultEngine]?.available) {
     defaultEngine = Object.keys(engines).find((k) => engines[k].available) || "manual";
   }
@@ -2222,23 +2375,17 @@ function openDetectModal() {
     .join("");
   modal("运行说话人检测", (body) => {
     body.innerHTML = `
-      <p class="hint">检测结果会自动与字幕时间轴对齐并按置信度归属；匹配不上你已创建角色的聚类，其字幕会保持「待定」，由你人工归属（宁可漏、不误判）。</p>
+      <p class="hint">检测完成后先试听聚类并确认对应角色，再批量归属字幕。已有人工复核的字幕默认保留。</p>
       <div class="field"><label>检测引擎</label><select id="d-engine">${options}</select><div class="hint" id="d-engine-note"></div></div>
-      <div class="device-row" id="d-device"></div>
       <div class="field-row">
-        <div class="field"><label>最少说话人数</label><input id="d-min" type="number" min="1" value="${cfg.min_speakers ?? 1}"></div>
-        <div class="field"><label>最多说话人数</label><input id="d-max" type="number" min="1" value="${cfg.max_speakers ?? 6}"></div>
+        <div class="field"><label>最少说话人数</label><input id="d-min" type="number" min="1" value="1"></div>
+        <div class="field"><label>最多说话人数</label><input id="d-max" type="number" min="1" value="6"></div>
       </div>
-      <p class="hint warn" id="d-space-warn" hidden></p>
       <details class="adv">
         <summary>高级</summary>
         <div class="adv-body">
-          <label class="check"><input type="checkbox" id="d-sweep"${defaultEngine === "voiceprint-cue" ? " checked" : ""}> 人数自动扫描（在上、下限之间逐个试，取分离度最优）</label>
-          <label class="check"><input type="checkbox" id="d-consensus"> 双引擎共识（<b>只增加待定、不纠错</b>；仅两引擎都强时做质检）</label>
-          <label class="check"><input type="checkbox" id="d-separate"${cfg.separate_vocals ? " checked" : ""}> 人声分离（先用 Demucs 剥离 BGM/伴奏再检测；更准但更慢）</label>
+          <label class="check"><input type="checkbox" id="d-conservative"> 保守归属：低于 85% 或多人争议时保持待定（关闭后为平衡模式，阈值 70%）</label>
           <label class="check"><input type="checkbox" id="d-overwrite"> 覆盖已人工复核的归属</label>
-          <p class="hint" id="d-extra-note"></p>
-          <p class="hint">声纹匹配阈值默认按引擎自动校准，可在「设置 → 检测」里调整。</p>
         </div>
       </details>
     `;
@@ -2247,75 +2394,6 @@ function openDetectModal() {
     const updateNote = () => { note.textContent = engines[select.value]?.detail || ""; };
     select.addEventListener("change", updateNote);
     updateNote();
-
-    // Warn before running when enrolled voiceprints live in another feature
-    // space than the selected engine: they would silently be skipped.
-    const spaceWarn = body.querySelector("#d-space-warn");
-    const updateSpaceWarn = () => {
-      const space = engines[select.value]?.space;
-      const stale = (state.project?.roles || []).filter(
-        (r) => r.has_voiceprint && r.embedder && space && r.embedder !== space);
-      if (stale.length) {
-        spaceWarn.hidden = false;
-        spaceWarn.textContent =
-          `⚠ ${stale.length} 个角色的声纹在「${stale[0].embedder}」空间，与所选引擎的「${space}」`
-          + "空间不同，本次检测不会参与先验匹配——请用当前引擎重新录入这些角色。";
-      } else {
-        spaceWarn.hidden = true;
-      }
-    };
-
-    const dev = state.meta.device || {};
-    const devNode = body.querySelector("#d-device");
-    const gpuEngines = new Set(["campp", "pyannote", "voiceprint-cue", "sortformer", "diarizen"]);
-    const renderDevice = () => {
-      const usesGpu = gpuEngines.has(select.value);
-      if (!usesGpu) {
-        devNode.className = "device-row";
-        devNode.innerHTML = "<span class=\"pill\">该引擎为内置算法，使用 CPU</span>";
-      } else if (dev.cuda) {
-        devNode.className = "device-row ok";
-        devNode.innerHTML = `<span class="card"><b>GPU 加速已启用</b><span class="hint">${escapeHtml(dev.name || "CUDA")}${dev.vram_gb ? " · " + dev.vram_gb + "GB" : ""} · torch ${escapeHtml(dev.torch || "")}</span></span>`;
-      } else {
-        devNode.className = "device-row warn";
-        devNode.innerHTML = `<span class="card"><b>当前在 CPU 上运行</b><span class="hint">未检测到可用的 CUDA（装了 CPU 版 torch？）。长视频会明显更慢。</span></span>`;
-      }
-      devNode.hidden = false;
-    };
-    select.addEventListener("change", renderDevice);
-    renderDevice();
-
-    const extra = body.querySelector("#d-extra-note");
-    const updateExtra = () => {
-      const parts = [];
-      if (body.querySelector("#d-sweep").checked) {
-        parts.push(select.value === "voiceprint-cue"
-          ? "人数扫描复用逐句声纹、只重聚类，耗时≈单次。"
-          : "人数扫描会按每个候选人数各跑一次（耗时≈单次 × 候选个数）。");
-      }
-      if (body.querySelector("#d-consensus").checked) {
-        parts.push("共识只把两引擎不一致的句子标为待定（不纠错），耗时≈两次。");
-      }
-      if (body.querySelector("#d-separate").checked) {
-        parts.push("人声分离首次会对整段音频跑一遍 Demucs（CPU 可能较久），结果会缓存。");
-      }
-      extra.textContent = parts.join(" ");
-    };
-    // Sweep defaults on only for the voiceprint-cue engine (its clustering is the
-    // weak link and a sweep is nearly free); follow the engine picker until the
-    // user touches the checkbox themselves.
-    const sweepBox = body.querySelector("#d-sweep");
-    let sweepTouched = false;
-    sweepBox.addEventListener("change", () => { sweepTouched = true; updateExtra(); });
-    body.querySelector("#d-consensus").addEventListener("change", updateExtra);
-    body.querySelector("#d-separate").addEventListener("change", updateExtra);
-    select.addEventListener("change", () => {
-      if (!sweepTouched) sweepBox.checked = select.value === "voiceprint-cue";
-      updateExtra();
-      updateSpaceWarn();
-    });
-    updateExtra();
-    updateSpaceWarn();
   }, [
     { label: "取消" },
     {
@@ -2325,20 +2403,15 @@ function openDetectModal() {
           min_speakers: Number(document.getElementById("d-min").value),
           max_speakers: Number(document.getElementById("d-max").value),
           overwrite_manual: document.getElementById("d-overwrite").checked,
-          sweep: document.getElementById("d-sweep").checked,
-          consensus: document.getElementById("d-consensus").checked,
-          separate_vocals: document.getElementById("d-separate").checked,
+          conservative: document.getElementById("d-conservative").checked,
         };
         try {
-          setBusy("检测中，请稍候…（长视频首次会先解码音频）");
-          const data = await API.post(`/api/projects/${state.projectId}/detect`, payload);
-          applyProject(data.project);
-          setMessage("检测完成：" + (data.project.detection_notes || []).join(" "), "ok");
+          const projectId = state.projectId;
+          await API.post(`/api/projects/${projectId}/detect/start`, payload);
           close();
+          syncDetectJob(projectId);
         } catch (err) {
           setMessage(err.message);
-        } finally {
-          setBusy("");
         }
       },
     },
@@ -2347,33 +2420,67 @@ function openDetectModal() {
 
 /* ------------------------------------------------------ 拖放导入 */
 
+/* Extension lists come from the backend (/api/state accepts) so the frontend
+   can never drift from the formats the backend actually understands. */
 function classifyPaths(paths) {
+  const accept = state.meta?.accept
+    || { media: ["mp4","mkv","mov","avi","webm","flv","ts","m4v","wmv","wav","mp3","m4a","aac","flac","ogg","opus","wma"],
+         subtitle: ["srt","ass","ssa"] };
   const media = [], subs = [], other = [];
   for (const path of paths) {
-    // classify client-side by extension (mirrors backend rules)
     const ext = (path.split(".").pop() || "").toLowerCase();
-    const mediaExt = ["mp4","mkv","mov","avi","webm","flv","ts","m4v","wmv","wav","mp3","m4a","aac","flac","ogg","opus","wma"];
-    const subExt = ["srt","vtt","ass","ssa"];
-    if (mediaExt.includes(ext)) media.push(path);
-    else if (subExt.includes(ext)) subs.push(path);
+    if (accept.media.includes(ext)) media.push(path);
+    else if (accept.subtitle.includes(ext)) subs.push(path);
     else other.push(path);
   }
   return { media, subs, other };
 }
 
 async function uploadDroppedFile(file) {
-  if (file.size > 512 * 1024 * 1024) {
-    throw new Error(`「${file.name}」超过 512MB，浏览器上传受限——请使用桌面版拖放（免上传）或直接填路径`);
+  const maxMb = state.meta?.max_upload_mb || 512;
+  if (file.size > maxMb * 1024 * 1024) {
+    throw new Error(`「${file.name}」超过 ${maxMb}MB 上限——请用「按本机路径导入」（项目库 > 导入新文件），或先压缩视频`);
   }
-  setBusy(`正在上传 ${file.name}…`);
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("PUT", `/api/upload?name=${encodeURIComponent(file.name)}`);
+    request.upload.onprogress = (event) => {
+      const progress = event.lengthComputable ? ` ${Math.round(event.loaded / event.total * 100)}%` : "";
+      setBusy(`正在上传 ${file.name}${progress}`);
+    };
+    request.onload = () => {
+      let data = {};
+      try { data = JSON.parse(request.responseText); } catch { /* server error body */ }
+      if (request.status >= 200 && request.status < 300 && data.ok !== false) resolve(data.path);
+      else reject(new Error(data.error || `上传失败: ${file.name}`));
+    };
+    request.onerror = () => reject(new Error(`上传失败: ${file.name}`));
+    request.send(file);
+  });
+}
+
+/* Create one project per (media, subtitle) pair; stray files are reported, not
+   silently dropped, and the last completed import stays on screen. */
+async function importPairs(pairs) {
+  setBusy("正在导入…");
   try {
-    const res = await fetch(`/api/upload?name=${encodeURIComponent(file.name)}`, {
-      method: "PUT",
-      body: file,
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.ok === false) throw new Error(data.error || `上传失败: ${file.name}`);
-    return data.path;
+    let created = null;
+    try {
+      for (const [mediaPath, subPath] of pairs) {
+        created = await API.post("/api/projects", {
+          media_path: mediaPath,
+          subtitle_path: subPath,
+        });
+      }
+    } finally {
+      if (created) {
+        await refreshMeta();
+        applyProject(created.project);
+      }
+    }
+    const names = pairs.map(([, sp]) => sp.split(/[\\/]/).pop()).slice(0, 3);
+    setMessage(`已导入 ${pairs.length} 个项目（${names.map((n) => n.replace(/\.\w+$/, "")).join("、")}` +
+      `${pairs.length > 3 ? "…" : ""}）`, "ok");
   } finally {
     setBusy("");
   }
@@ -2386,7 +2493,7 @@ function showDropOverlay(text) {
     node.id = "drop-overlay";
     document.body.appendChild(node);
   }
-  node.textContent = text || "松开导入 · 视频/音频 + 字幕（可带译文）";
+  node.textContent = text || "松开导入 · 视频/音频 + 字幕";
   node.classList.add("visible");
 }
 
@@ -2394,46 +2501,109 @@ function hideDropOverlay() {
   document.getElementById("drop-overlay")?.classList.remove("visible");
 }
 
-async function handleDroppedFiles(names) {
-  try {
-    const { media, subs, other } = classifyPaths(names);
-    if (other.length) setMessage(`已忽略不认识的文件：${other.map((n) => n.split(/[\\/]/).pop()).join("、")}`);
-
-    // 视频/音频 + 字幕 → 直接新建项目（无论当前是否已打开项目）
-    if (media.length && subs.length) {
-      setBusy("正在导入…");
-      const data = await API.post("/api/projects", {
-        media_path: media[0],
-        subtitle_path: subs[0],
-        second_subtitle_path: subs[1] || null,
-        line_mode: "auto",
-      });
-      await refreshMeta();
-      applyProject(data.project);
-      setMessage(`已导入「${data.project.name}」，共 ${data.project.segments.length} 条字幕。`, "ok");
-      return;
-    }
-
-    // 只拖字幕且已打开项目 → 作为译文挂载
-    if (state.project && !media.length && subs.length) {
-      setBusy("正在挂载翻译字幕…");
-      const data = await API.post(`/api/projects/${state.projectId}/translation`, { path: subs[0] });
-      applyProject(data.project);
-      setMessage(`已挂载译文「${subs[0].split(/[\\/]/).pop()}」，匹配 ${data.project.segments.filter(s => s.translation).length} 条`, "ok");
-      return;
-    }
-
-    // Otherwise prefill the import modal and let the user confirm.
-    openImportModal();
-    if (media.length) el("imp-media").value = media[0];
-    if (subs.length) el("imp-sub").value = subs[0];
-    if (subs.length > 1) el("imp-sub2").value = subs[1];
-    setMessage("已填入拖入的文件路径，确认后点「导入」。");
-  } catch (err) {
-    setMessage(err.message);
-  } finally {
-    setBusy("");
+function pairDroppedFiles(files) {
+  const media = [], subs = [], other = [];
+  for (const file of files) {
+    const type = classifyPaths([file.name]);
+    if (type.media.length) media.push(file);
+    else if (type.subs.length) subs.push(file);
+    else other.push(file.name);
   }
+  return { media, subs, other };
+}
+
+function openImportPreview(previews, onConfirm) {
+  modal("核对导入内容", (body) => {
+    for (const preview of previews) {
+      const row = document.createElement("div");
+      row.className = "import-preview";
+      const heading = document.createElement("b");
+      heading.textContent = `${preview.media_name} + ${preview.subtitle_name}`;
+      const summary = document.createElement("span");
+      summary.textContent = `${preview.segments} 条字幕 · 媒体 ${fmtTime(preview.media_duration)} · 字幕结束 ${fmtTime(preview.subtitle_end)}`;
+      row.append(heading, summary);
+      for (const note of preview.notes) {
+        const warning = document.createElement("span");
+        warning.className = "hint warn";
+        warning.textContent = note;
+        row.appendChild(warning);
+      }
+      body.appendChild(row);
+    }
+  }, [
+    { label: "取消" },
+    { label: `导入 ${previews.length} 组`, primary: true, onClick: async (close) => {
+      close();
+      try { await onConfirm(); } catch (err) { setMessage(err.message); }
+    } },
+  ]);
+}
+
+async function previewPaths(pairs, onConfirm) {
+  setBusy("正在检查文件…");
+  try {
+    const previews = [];
+    for (const [mediaPath, subtitlePath] of pairs) {
+      const data = await API.post("/api/import/preview", {
+        media_path: mediaPath, subtitle_path: subtitlePath,
+      });
+      previews.push(data.preview);
+    }
+    openImportPreview(previews, onConfirm);
+  } finally { setBusy(""); }
+}
+
+function previewDroppedFiles(files) {
+  const { media, subs, other } = pairDroppedFiles(files);
+  modal("确认导入", (body) => {
+    const list = document.createElement("div");
+    list.className = "file-list";
+    const stem = (name) => name.replace(/\.[^.]+$/, "").replace(/\.(scjp|chs|cht|zh|en|ja|jp)$/i, "").toLocaleLowerCase();
+    media.forEach((mediaFile, index) => {
+      const row = document.createElement("label");
+      row.className = "import-pair";
+      const name = document.createElement("span");
+      name.textContent = `${mediaFile.name} (${(mediaFile.size / 1048576).toFixed(1)} MB)`;
+      const select = document.createElement("select");
+      select.dataset.mediaIndex = index;
+      select.add(new Option("选择字幕…", ""));
+      subs.forEach((subtitle, subIndex) => select.add(new Option(subtitle.name, String(subIndex))));
+      const matches = subs.map((sub, subIndex) => stem(sub.name) === stem(mediaFile.name) ? subIndex : -1)
+        .filter((subIndex) => subIndex >= 0);
+      if (matches.length === 1) select.value = String(matches[0]);
+      else if (media.length === 1 && subs.length === 1) select.value = "0";
+      row.append(name, select);
+      list.appendChild(row);
+    });
+    if (media.length) body.appendChild(list);
+    const note = document.createElement("p");
+    note.className = "hint";
+    note.textContent = other.length ? `不支持的文件：${other.join("、")}`
+      : "每个媒体文件选择一个字幕；未配对的文件不会导入。";
+    body.appendChild(note);
+  }, [
+    { label: "取消" },
+    { label: "检查配对", primary: true, onClick: async (close) => {
+      const pairs = [];
+      const used = new Set();
+      for (const select of document.querySelectorAll(".import-pair select")) {
+        if (select.value === "") continue;
+        if (used.has(select.value)) { setMessage("同一字幕不能配给多个媒体文件"); return; }
+        used.add(select.value);
+        pairs.push([media[Number(select.dataset.mediaIndex)], subs[Number(select.value)]]);
+      }
+      if (!pairs.length) { setMessage("请至少选择一组媒体和字幕"); return; }
+      close();
+      try {
+        const paths = [];
+        for (const pair of pairs) {
+          paths.push([await uploadDroppedFile(pair[0]), await uploadDroppedFile(pair[1])]);
+        }
+        await previewPaths(paths, () => importPairs(paths));
+      } catch (err) { setMessage(err.message); }
+      finally { setBusy(""); }
+    } },
+  ]);
 }
 
 function wireDragDrop() {
@@ -2452,347 +2622,48 @@ function wireDragDrop() {
   window.addEventListener("drop", async (event) => {
     event.preventDefault();
     hideDropOverlay();
-    // 桌面版（pywebview）：由 Python 侧的 DOM 事件提供真实路径，这里不重复处理。
-    if (window.pywebview) return;
     const files = [...(event.dataTransfer?.files || [])];
     if (!files.length) return;
-    try {
-      const paths = [];
-      for (const file of files) paths.push(await uploadDroppedFile(file));
-      await handleDroppedFiles(paths);
-    } catch (err) {
-      setMessage(err.message);
-    }
+    previewDroppedFiles(files);
   });
 }
 
-/* --------------------------------------------------------- 设置中心 */
-
-async function saveServerSetting(patch) {
-  try {
-    const data = await API.post("/api/settings", patch);
-    if (state.meta) state.meta.settings = data.settings;
-    setMessage("设置已保存", "ok");
-    return data.settings;
-  } catch (err) {
-    setMessage(err.message);
-    return null;
-  }
-}
-
-function openSettings() {
-  const cfg = state.meta?.settings || {};
-  const engines = state.meta?.engines || {};
-  const asr = state.meta?.asr || {};
-  const vpModels = state.meta?.voiceprint_models || [];
-  const sections = [
-    { id: "appearance", label: "外观" },
-    { id: "playback", label: "播放与复核" },
-    { id: "detect", label: "检测" },
-    { id: "asr", label: "转录 ASR" },
-    { id: "advanced", label: "高级" },
-  ];
-
-  const root = el("modal-root");
-  const backdrop = document.createElement("div");
-  backdrop.className = "modal-backdrop";
-  backdrop.innerHTML = `
-    <div class="modal modal-wide settings">
-      <h2>设置</h2>
-      <div class="settings-body">
-        <aside class="set-nav">${sections.map((s, i) =>
-          `<button class="set-item${i === 0 ? " active" : ""}" data-sec="${s.id}">${s.label}</button>`).join("")}
-        </aside>
-        <div class="set-content"></div>
-      </div>
-    </div>`;
-  root.appendChild(backdrop);
-  const content = backdrop.querySelector(".set-content");
-  const close = () => { root.innerHTML = ""; };
-  backdrop.addEventListener("mousedown", (e) => { if (e.target === backdrop) close(); });
-
-  const row = (label, hint, control) => `
-    <div class="set-row">
-      <div class="set-label"><b>${label}</b>${hint ? `<span>${hint}</span>` : ""}</div>
-      <div class="set-control">${control}</div>
-    </div>`;
-  const group = (title, inner) => `<div class="set-group"><div class="set-group-title">${title}</div><div class="set-group-box">${inner}</div></div>`;
-  const sw = (id, checked) => `<label class="toggle"><input type="checkbox" id="${id}" ${checked ? "checked" : ""}><i></i></label>`;
-
-  const renderers = {
-    appearance() {
-      content.innerHTML = `
-        ${group("主题", row("外观", "工具栏右上角可一键切换深色 / 浅色", `
-          <div class="segmented" id="seg-theme">
-            ${[["dark", "深色"], ["light", "浅色"], ["auto", "跟随系统"]].map(([v, t]) =>
-              `<button data-v="${v}" class="${prefs.theme === v ? "active" : ""}">${t}</button>`).join("")}
-          </div>`))}
-        ${group("强调色", row("主色调", "按钮、播放头与选中态", `
-          <div class="accent-dots" id="accent-dots">
-            ${[["violet", "#8b7cff"], ["blue", "#4da3ff"], ["rose", "#ff6b8a"], ["green", "#2ec27e"]].map(([v, c]) =>
-              `<button data-v="${v}" style="--c:${c}" class="${prefs.accent === v ? "active" : ""}"></button>`).join("")}
-          </div>`))}
-        ${group("辅助",
-          row("显示快捷键角标", "说话人按钮上的 1-9 / 0", sw("set-kbd", prefs.showKbd)) +
-          row("视频内嵌字幕", "把当前字幕叠在画面上", sw("set-overlay", prefs.overlay !== false)))}
-      `;
-      content.querySelector("#seg-theme").addEventListener("click", (e) => {
-        const btn = e.target.closest("button[data-v]"); if (!btn) return;
-        prefs.theme = btn.dataset.v; savePrefs(); applyTheme();
-        content.querySelectorAll("#seg-theme button").forEach((b) => b.classList.toggle("active", b === btn));
-      });
-      content.querySelector("#accent-dots").addEventListener("click", (e) => {
-        const btn = e.target.closest("button[data-v]"); if (!btn) return;
-        prefs.accent = btn.dataset.v; savePrefs(); applyTheme();
-        content.querySelectorAll("#accent-dots button").forEach((b) => b.classList.toggle("active", b === btn));
-      });
-      content.querySelector("#set-kbd").addEventListener("change", (e) => {
-        prefs.showKbd = e.target.checked; savePrefs(); applyPrefsToWorkspace();
-      });
-      content.querySelector("#set-overlay").addEventListener("change", (e) => {
-        prefs.overlay = e.target.checked; savePrefs(); renderVideoOverlay();
-      });
-    },
-
-    playback() {
-      content.innerHTML = `
-        ${group("播放", 
-          row("播放速度", "", `<div class="select-wrap"><select id="set-rate">${[0.75, 1, 1.25, 1.5, 2].map(r =>
-            `<option value="${r}" ${prefs.rate === r ? "selected" : ""}>${r}×</option>`).join("")}</select></div>`) +
-          row("单句循环", "播到当前句结尾自动回退", sw("set-loop", prefs.loop)))}
-        ${group("复核",
-          row("归属后跳下一句", "连续归属更顺手", sw("set-autonext", prefs.autonext)) +
-          row("播放条跟随播放", "播放时标尺平滑跟随；关闭后可手动定位", sw("set-follow", prefs.follow)) +
-          row("默认缩放", "播放条时间密度", `<input type="range" id="set-zoom" min="0.25" max="4" step="0.05" value="${prefs.zoom}">`))}
-      `;
-      content.querySelector("#set-rate").addEventListener("change", (e) => {
-        prefs.rate = Number(e.target.value); savePrefs();
-        if (state.media) state.media.playbackRate = prefs.rate;
-      });
-      content.querySelector("#set-loop").addEventListener("change", (e) => {
-        prefs.loop = e.target.checked; savePrefs();
-        const c = el("chk-loop"); if (c) c.checked = prefs.loop;
-      });
-      content.querySelector("#set-autonext").addEventListener("change", (e) => {
-        prefs.autonext = e.target.checked; savePrefs();
-        const c = el("chk-autonext"); if (c) c.checked = prefs.autonext;
-      });
-      content.querySelector("#set-follow").addEventListener("change", (e) => {
-        prefs.follow = e.target.checked; savePrefs(); applyPrefsToWorkspace();
-        const c = el("chk-follow"); if (c) c.checked = prefs.follow;
-      });
-      content.querySelector("#set-zoom").addEventListener("input", (e) => {
-        prefs.zoom = Number(e.target.value); savePrefs(); applyDefaultZoom();
-      });
-    },
-
-    detect() {
-      const engineOptions = Object.entries(engines).map(([key, info]) =>
-        `<option value="${key}" ${info.available ? "" : "disabled"} ${cfg.default_engine === key ? "selected" : ""}>${escapeHtml(info.label)}${info.available ? "" : "（不可用）"}</option>`).join("");
-      content.innerHTML = `
-        ${group("引擎",
-          row("默认检测引擎", "检测弹窗将预选此项", `<div class="select-wrap"><select id="set-engine">${engineOptions}</select></div>`) +
-          row("最少 / 最多说话人数", "", `
-            <div class="range-inputs">
-              <input type="number" id="set-min" min="1" value="${cfg.min_speakers ?? 1}" style="width:70px">
-              <span class="pill">至</span>
-              <input type="number" id="set-max" min="1" value="${cfg.max_speakers ?? 6}" style="width:70px">
-            </div>`))}
-        ${group("声纹先验",
-          row("声纹模型", "决定特征空间；切换后需用新模型重新录入声纹（pyannote 家族生效）", vpModels.length
-            ? `<div class="select-wrap"><select id="set-vp">${vpModels.map((m) =>
-                `<option value="${m.key}" ${m.available === false ? "disabled" : ""} ${cfg.voiceprint_model === m.key ? "selected" : ""}>${escapeHtml(m.label)}${m.available === false ? "（不可用）" : ""}</option>`).join("")}</select></div>`
-            : `<span class="pill">仅内置</span>`) +
-          row("匹配阈值", "自动 = 按引擎特征空间校准（pyannote≈0.66 / CAM++≈0.76 / 内置≈0.84）；匹配不上的聚类保持待定", `
-            <div class="range-inputs">
-              <label class="check inline"><input type="checkbox" id="set-threshold-auto" ${cfg.threshold == null ? "checked" : ""}> 自动</label>
-              <input type="range" id="set-threshold" min="0.5" max="1" step="0.01" value="${cfg.threshold ?? 0.8}" ${cfg.threshold == null ? "disabled" : ""}>
-              <b class="mono" id="set-threshold-val">${(cfg.threshold ?? 0.8).toFixed(2)}</b>
-            </div>`))}
-        ${group("音频预处理",
-          row("人声分离（Demucs）", "检测/录入前先剥离 BGM 与伴奏；需 pip install demucs。日番或 BGM 很响时更准，但首次较慢。", `
-            <label class="check inline"><input type="checkbox" id="set-separate" ${cfg.separate_vocals ? "checked" : ""}> 启用</label>`))}
-        <p class="hint">声纹只在同一特征空间内匹配；切换引擎后需用当前引擎重新录入声纹。</p>
-      `;
-      content.querySelector("#set-engine").addEventListener("change", (e) => saveServerSetting({ default_engine: e.target.value }));
-      const saveCount = () => saveServerSetting({
-        min_speakers: Number(content.querySelector("#set-min").value) || 1,
-        max_speakers: Number(content.querySelector("#set-max").value) || 6,
-      });
-      content.querySelector("#set-min").addEventListener("change", saveCount);
-      content.querySelector("#set-max").addEventListener("change", saveCount);
-      const threshold = content.querySelector("#set-threshold");
-      const thresholdAuto = content.querySelector("#set-threshold-auto");
-      threshold.addEventListener("input", () => {
-        content.querySelector("#set-threshold-val").textContent = Number(threshold.value).toFixed(2);
-      });
-      threshold.addEventListener("change", () => saveServerSetting({ threshold: Number(threshold.value) }));
-      thresholdAuto.addEventListener("change", () => {
-        threshold.disabled = thresholdAuto.checked;
-        saveServerSetting({ threshold: thresholdAuto.checked ? null : Number(threshold.value) });
-      });
-      content.querySelector("#set-separate").addEventListener("change", (e) =>
-        saveServerSetting({ separate_vocals: e.target.checked }));
-      const vpSel = content.querySelector("#set-vp");
-      if (vpSel) vpSel.addEventListener("change", (e) => saveServerSetting({ voiceprint_model: e.target.value }));
-    },
-
-    asr() {
-      const models = asr.models || [];
-      content.innerHTML = `
-        ${group("转录",
-          row("默认模型", "越大越准越慢", models.length
-            ? `<div class="select-wrap"><select id="set-asr-model">${models.map((m) =>
-                `<option value="${m}" ${cfg.asr_model === m ? "selected" : ""}>${m}</option>`).join("")}</select></div>`
-            : `<span class="pill">faster-whisper 未安装</span>`) +
-          row("默认语言", "留空自动检测", `<input type="text" id="set-asr-lang" value="${escapeHtml(cfg.asr_language || "")}" placeholder="zh" style="width:110px">`))}
-        ${asr.available ? "" : `<p class="hint">${escapeHtml(asr.detail || "安装 faster-whisper 后可用。")}</p>`}
-      `;
-      const modelSel = content.querySelector("#set-asr-model");
-      if (modelSel) modelSel.addEventListener("change", (e) => saveServerSetting({ asr_model: e.target.value }));
-      content.querySelector("#set-asr-lang").addEventListener("change", (e) => saveServerSetting({ asr_language: e.target.value.trim() }));
-    },
-
-    advanced() {
-      const engineRows = Object.entries(engines).map(([key, info]) =>
-        `<div class="set-row"><div class="set-label"><b>${escapeHtml(info.label)}</b><span>${escapeHtml(info.available ? "可用" : "不可用 · 需要安装依赖")}</span></div><span class="status-dot ${info.available ? "ok" : "off"}"></span></div>`).join("");
-      const dev = state.meta?.device || {};
-      content.innerHTML = `
-        ${group("计算设备", `
-          <div class="set-row"><div class="set-label"><b>${dev.cuda ? "GPU 加速" : "CPU 模式"}</b>
-            <span>${dev.cuda ? escapeHtml((dev.name || "CUDA") + (dev.vram_gb ? " · " + dev.vram_gb + "GB 显存" : "")) : "未启用 CUDA：神经引擎（CAM++ / pyannote）将用 CPU，长视频较慢"}</span></div>
-            <span class="status-dot ${dev.cuda ? "ok" : "off"}"></span></div>
-          <div class="set-row"><div class="set-label"><b>torch</b><span class="mono">${escapeHtml(dev.torch || "未安装")}</span></div></div>`)}
-        ${group("HuggingFace Token", `
-          ${row("Token 状态", "pyannote 需要模型使用授权", `<span class="pill">${cfg.hf_token_set ? "已配置 ✓" : "未配置"}</span>`)}
-          <div class="set-row"><div class="set-label"><b>写入 Token</b><span>保存到本地 data/hf_token.txt（仅本机）</span></div>
-            <div class="range-inputs"><input type="password" id="set-token" placeholder="hf_..." style="width:190px">
-            <button class="btn sm" id="set-token-save">保存</button></div></div>`)}
-        ${group("引擎可用性", engineRows)}
-        ${group("维护",
-          row("数据目录", `<span class="mono">${escapeHtml(cfg.data_dir || "")}</span>`, "") +
-          row("临时文件", "清理解码缓存 WAV 与波形缓存", `<button class="btn sm" id="set-clean">清理</button>`) +
-          row("上传文件", "删除已无项目引用的上传媒体 / 字幕副本", `<button class="btn sm" id="set-clean-uploads">清理</button>`))}
-        <p class="hint">ffmpeg：${state.meta?.ffmpeg ? "已找到 ✓" : "未找到 ✗（影响解码与导出）"}</p>
-      `;
-      content.querySelector("#set-token-save").addEventListener("click", async () => {
-        const value = content.querySelector("#set-token").value.trim();
-        if (!value) { setMessage("请先粘贴 Token"); return; }
-        const result = await saveServerSetting({ hf_token: value });
-        if (result) setMessage("Token 已保存到本地文件", "ok");
-      });
-      content.querySelector("#set-clean").addEventListener("click", async () => {
-        try {
-          const data = await API.post("/api/maintenance", { action: "clean_work" });
-          setMessage(`已清理 ${data.removed} 个临时文件`, "ok");
-        } catch (err) { setMessage(err.message); }
-      });
-      content.querySelector("#set-clean-uploads").addEventListener("click", async () => {
-        try {
-          const data = await API.post("/api/maintenance", { action: "clean_uploads" });
-          setMessage(`已清理 ${data.removed} 个未使用的上传文件`, "ok");
-        } catch (err) { setMessage(err.message); }
-      });
-    },
-  };
-
-  const show = (secId) => {
-    content.classList.add("fade");
-    (renderers[secId] || renderers.appearance)();
-    setTimeout(() => content.classList.remove("fade"), 180);
-  };
-  backdrop.querySelectorAll(".set-item").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      backdrop.querySelectorAll(".set-item").forEach((b) => b.classList.toggle("active", b === btn));
-      show(btn.dataset.sec);
-    });
-  });
-  show("appearance");
-}
-
-/* --------------------------------------------------------- 设置中心 end */
-
-function openAsrModal() {
-  const asr = state.meta.asr || { available: false, detail: "" };
-  const cfg = state.meta.settings || {};
-  modal("ASR 转录生成字幕（可选）", (body) => {
-    const models = asr.models || [];
-    body.innerHTML = `
-      <p class="hint">${escapeHtml(asr.detail || "")}</p>
-      ${asr.available ? `
-      <div class="field"><label>模型</label><select id="asr-model">${models
-        .map((m) => `<option value="${m}" ${m === (cfg.asr_model || "small") ? "selected" : ""}>${m}</option>`).join("")}</select></div>
-      <div class="field"><label>语言（留空自动检测，中文填 zh；默认可在设置里改）</label><input id="asr-lang" type="text" placeholder="${escapeHtml(cfg.asr_language || "zh")}" value="${escapeHtml(cfg.asr_language || "")}"></div>
-      <p class="hint">转录完成后会生成一个 SRT 文件，路径自动填回导入表单。</p>` : ""}
-    `;
-  }, [
-    { label: "关闭" },
-    ...(asr.available ? [{
-      label: "开始转录", primary: true, onClick: async (close) => {
-        const mediaPath = document.getElementById("imp-media").value.trim();
-        if (!mediaPath) { setMessage("请先在上面的导入表单里填写媒体路径"); return; }
-        try {
-          setBusy("转录中，首次会下载模型，请耐心等待…");
-          const data = await API.post("/api/transcribe", {
-            media_path: mediaPath,
-            model_size: document.getElementById("asr-model").value,
-            language: document.getElementById("asr-lang").value.trim() || null,
-          });
-          document.getElementById("imp-sub").value = data.subtitle_path;
-          setMessage(`转录完成：${data.count} 条字幕（语言 ${data.language}），字幕路径已填入。`, "ok");
-          close();
-        } catch (err) {
-          setMessage(err.message);
-        } finally {
-          setBusy("");
-        }
-      },
-    }] : []),
-  ]);
-}
 
 /* ----------------------------------------------------------------- export */
 
 function openExportModal() {
   const formats = state.meta.formats || [];
-  modal("导出 / 数据集", (body) => {
+  const pending = currentSegments().filter((seg) => seg.speaker_id === null).length;
+  const review = currentSegments().filter((seg) => needsReview(seg) && seg.speaker_id !== null).length;
+  const unnamed = (state.project.roles || []).filter((role) => role.type === "pending").length;
+  modal("导出", (body, close) => {
     body.innerHTML = `
+      <div class="export-check">待定 ${pending} 条 · 低匹配或多人争议 ${review} 条 · 未命名角色 ${unnamed} 个${state.project.mapping_pending ? " · 聚类映射未确认" : ""}
+        <button id="export-review" class="btn ghost sm">查看需复核字幕</button></div>
       <div class="field"><label>导出格式</label>
         <div class="grid-checks" id="fmt-checks">${formats.map((f) => `
-          <label class="check"><input type="checkbox" value="${f.id}" ${["srt", "ass", "jsonl", "dataset"].includes(f.id) ? "checked" : ""}>${escapeHtml(f.label)}</label>
+          <label class="check"><input type="checkbox" value="${f.id}" ${f.id === "srt" ? "checked" : ""}>${escapeHtml(f.label)}</label>
         `).join("")}</div>
       </div>
-      <div class="field"><label>导出内容</label>
-        <div class="grid-checks">
-          <label class="check"><input type="checkbox" id="opt-pending" checked> 包含待定字幕</label>
-          <label class="check"><input type="checkbox" id="opt-assigned-only"> 仅导出已归属</label>
-          <label class="check"><input type="checkbox" id="opt-confidence" checked> 包含置信度</label>
-          <label class="check"><input type="checkbox" id="opt-status" checked> 包含复核状态</label>
-          <label class="check"><input type="checkbox" id="opt-rolelib" checked> 数据集含角色库</label>
-          <label class="check"><input type="checkbox" id="opt-voiceprints"> 数据集含声纹向量</label>
+      <details class="adv"><summary>高级</summary>
+        <div class="adv-body">
+          <div class="field"><label>导出内容</label>
+            <div class="grid-checks">
+              <label class="check"><input type="checkbox" id="opt-pending" checked> 包含待定字幕</label>
+            </div>
+          </div>
         </div>
-      </div>
+      </details>
       <div class="field"><label>文件名前缀</label><input id="opt-stem" type="text" value="${escapeHtml(state.project.name)}"></div>
-      ${state.project.bilingual ? `
-      <div class="field"><label>语言输出</label>
-        <div class="segmented" id="opt-lang">
-          <button data-v="primary">仅原文</button>
-          <button data-v="both" class="active">原文 + 译文</button>
-          <button data-v="translation">仅译文</button>
-        </div>
-        <div class="hint">字幕：译文缩进在原文下方（ASS 用独立小字号样式）；数据集：同时输出 text / translation 字段。</div>
-      </div>` : ""}
       <div id="export-result"></div>
     `;
-    const langSeg = body.querySelector("#opt-lang");
-    if (langSeg) {
-      langSeg.querySelectorAll("button").forEach((btn) => {
-        btn.classList.toggle("active", btn.dataset.v === prefs.lang);
-        btn.addEventListener("click", () => {
-          langSeg.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b === btn));
-        });
-      });
-    }
+    body.querySelector("#export-review").addEventListener("click", () => {
+      close();
+      state.queueFilter = "review";
+      renderQueue();
+      const first = currentSegments().find(needsReview);
+      if (first) selectSegment(first.id, true);
+    });
   }, [
     { label: "关闭" },
     {
@@ -2800,14 +2671,8 @@ function openExportModal() {
         const selected = [...document.querySelectorAll("#fmt-checks input:checked")].map((i) => i.value);
         if (!selected.length) { setMessage("请至少选择一种导出格式"); return; }
         const options = {
-          include_pending: document.getElementById("opt-pending").checked,
-          only_assigned: document.getElementById("opt-assigned-only").checked,
-          include_confidence: document.getElementById("opt-confidence").checked,
-          include_status: document.getElementById("opt-status").checked,
-          include_role_library: document.getElementById("opt-rolelib").checked,
-          include_voiceprints: document.getElementById("opt-voiceprints").checked,
           filename_stem: document.getElementById("opt-stem").value || state.project.name,
-          text_field: (document.querySelector("#opt-lang button.active") || {}).dataset?.v || "both",
+          include_pending: document.getElementById("opt-pending").checked,
         };
         const target = document.getElementById("export-result");
         try {
@@ -2817,7 +2682,13 @@ function openExportModal() {
           target.innerHTML = `<div class="field"><label>已生成 ${data.files.length} 个文件</label>
             <div class="file-list">${data.files.map((f) => `
               <div class="file-item"><a href="/api/projects/${state.projectId}/export/${encodeURIComponent(f.filename)}" download>${escapeHtml(f.filename)}</a>
-              <span class="pill">${f.label} · ${(f.bytes / 1024).toFixed(1)} KB</span></div>`).join("")}</div></div>`;
+              <span class="pill">${f.label} · ${(f.bytes / 1024).toFixed(1)} KB</span></div>`).join("")}</div>
+            <p class="hint">本次导出检查：待定 ${pending} 条、争议 ${review} 条、未命名角色 ${unnamed} 个。</p>
+            <button id="export-next" class="btn primary">＋ 导入下一组</button></div>`;
+          target.querySelector("#export-next")?.addEventListener("click", () => {
+            close();
+            openImportChooser();
+          });
           setMessage(`导出完成：${data.files.length} 个文件`, "ok");
         } catch (err) {
           setMessage(err.message);
@@ -2829,99 +2700,55 @@ function openExportModal() {
   ]);
 }
 
-/* ----------------------------------------------------------------- import */
+/* Delete a project: removes its record, exports, and the uploaded media /
+   subtitle copies — never the user's original files at their own paths. */
+async function deleteProject(id) {
+  if (!id) return false;
+  if (!window.confirm("删除当前视频与字幕？会一并删除该项目的导出文件与已上传的媒体/字幕副本（你自己路径下的原文件不动）。")) return false;
+  try {
+    const data = await API.del(`/api/projects/${id}`);
+    await refreshMeta();
+    if (state.projectId === id) resetWorkspace();
+    const n = data.removed_uploads || 0;
+    setMessage(`已删除视频与字幕${n ? `，并清理 ${n} 个上传文件` : ""}`, "ok");
+    return true;
+  } catch (err) {
+    setMessage(err.message);
+    return false;
+  }
+}
 
-function openImportModal() {
-  modal("导入视频 + 字幕", (body) => {
-    body.innerHTML = `
-      <p class="hint">填写本机绝对路径（Windows 例：<code>C:\\videos\\a.mp4</code>，Git Bash 例：<code>/c/videos/a.mp4</code>）。字幕支持 SRT / VTT / ASS。</p>
-      <div class="field"><label>视频或音频文件</label>
-        <div class="path-input">
-          <input id="imp-media" type="text" placeholder="C:\\videos\\interview.mp4">
-          <button class="btn ghost small" data-pick="media" data-target="imp-media" hidden>浏览…</button>
-        </div>
-      </div>
-      <div class="field"><label>字幕文件（原文）</label>
-        <div class="path-input">
-          <input id="imp-sub" type="text" placeholder="C:\\videos\\interview.srt">
-          <button class="btn ghost small" data-pick="subtitle" data-target="imp-sub" hidden>浏览…</button>
-        </div>
-      </div>
-      <div class="field"><label>翻译字幕文件（可选，用于双语）</label>
-        <div class="path-input">
-          <input id="imp-sub2" type="text" placeholder="C:\\videos\\interview.en.srt — 留空则自动识别单文件双语">
-          <button class="btn ghost small" data-pick="subtitle" data-target="imp-sub2" hidden>浏览…</button>
-        </div>
-      </div>
-      <div class="field"><label>多行字幕处理</label>
-        <select id="imp-linemode">
-          <option value="auto" selected>自动识别（推荐）</option>
-          <option value="interleaved">交错双语：日/中轨交错，按时间配对</option>
-          <option value="bilingual">双语：第 1 行原文，其余为译文</option>
-          <option value="join">硬换行：合并为一句</option>
-          <option value="keep">保持原样</option>
-        </select>
-      </div>
-      <div class="field"><label>项目名称（可选）</label><input id="imp-name" type="text" placeholder="留空则用文件名"></div>
-      <div class="assign-row" style="border-bottom:none;padding:4px 0 0">
-        <span class="assign-label">没有字幕？</span>
-        <button id="imp-asr" class="ghost small">用 ASR 转录生成（可选）</button>
-      </div>
-    `;
-    body.querySelector("#imp-asr").addEventListener("click", openAsrModal);
-    // 桌面版（pywebview）提供系统文件选择框，可直接选路径；浏览器版不显示浏览按钮。
-    if (window.pywebview?.api?.pick_file) {
-      body.querySelectorAll("[data-pick]").forEach((btn) => {
-        btn.hidden = false;
-        btn.addEventListener("click", async () => {
-          try {
-            const path = await window.pywebview.api.pick_file(btn.dataset.pick);
-            if (path) document.getElementById(btn.dataset.target).value = path;
-          } catch (err) {
-            setMessage(String(err));
-          }
-        });
-      });
-    }
-  }, [
-    { label: "取消" },
-    {
-      label: "导入", primary: true, onClick: async (close) => {
-        const payload = {
-          media_path: document.getElementById("imp-media").value.trim().replace(/^"|"$/g, ""),
-          subtitle_path: document.getElementById("imp-sub").value.trim().replace(/^"|"$/g, ""),
-          second_subtitle_path: document.getElementById("imp-sub2").value.trim().replace(/^"|"$/g, "") || null,
-          line_mode: document.getElementById("imp-linemode").value,
-          name: document.getElementById("imp-name").value.trim() || null,
-        };
-        if (!payload.media_path || !payload.subtitle_path) { setMessage("请填写媒体与字幕路径"); return; }
-        try {
-          setBusy("正在导入…");
-          const data = await API.post("/api/projects", payload);
-          await refreshMeta();
-          applyProject(data.project);
-          close();
-          const notes = (data.project.import_notes || []).join(" ");
-          setMessage(`已导入「${data.project.name}」，共 ${data.project.segments.length} 条字幕。${notes}`, "ok");
-        } catch (err) {
-          setMessage(err.message);
-        } finally {
-          setBusy("");
-        }
-      },
-    },
-  ]);
+/* 初始化：清空所有项目及其文件，回到空白工作区；随后拖入视频+字幕即可导入。 */
+async function initializeAll() {
+  if (!window.confirm("初始化会删除所有项目及其上传 / 缓存 / 导出文件，确定继续？")) return;
+  try {
+    setBusy("正在初始化…");
+    await API.post("/api/initialize", {});
+    await refreshMeta();
+    resetWorkspace();
+    setMessage("已初始化，拖入「视频/音频 + 字幕」即可导入。", "ok");
+  } catch (err) {
+    setMessage(err.message);
+  } finally {
+    setBusy("");
+  }
 }
 
 function openProjectList() {
   modal("打开项目", (body, close) => {
     const projects = state.meta.projects || [];
-    body.innerHTML = projects.length
-      ? `<div class="file-list">${projects.map((p) => `
+    body.innerHTML = `
+      <div class="field-row">
+        <button id="btn-path-import" class="ghost small">＋ 按本机路径导入新文件…</button>
+        <span class="hint">大文件 / 已在磁盘上的文件可不经浏览器上传</span>
+      </div>
+      ${projects.length
+        ? `<div class="file-list">${projects.map((p) => `
         <div class="file-item"><a href="#" data-id="${p.id}">${escapeHtml(p.name)}</a>
         <span class="pill">${p.segments} 条 · 已归属 ${p.stats.assigned} · 更新 ${p.updated || ""}</span>
         <span class="spacer"></span><button class="ghost small" data-del="${p.id}">删除</button></div>`).join("")}</div>`
-      : '<div class="hint">还没有项目，先导入一个视频和字幕。</div>';
+        : '<div class="hint">还没有项目，先导入一个视频和字幕。</div>'}`;
+    body.querySelector("#btn-path-import")?.addEventListener("click", () => openPathImport(close));
     body.querySelectorAll("a[data-id]").forEach((link) => {
       link.addEventListener("click", async (event) => {
         event.preventDefault();
@@ -2933,69 +2760,145 @@ function openProjectList() {
     });
     body.querySelectorAll("button[data-del]").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        if (!window.confirm("删除该项目？会一并删除它的导出文件与已上传的媒体/字幕副本（你自己路径下的原文件不动）。")) return;
-        try {
-          const data = await API.del(`/api/projects/${btn.dataset.del}`);
-          await refreshMeta();
-          if (state.projectId === btn.dataset.del) resetWorkspace();
-          close();
-          const n = data.removed_uploads || 0;
-          setMessage(`已删除项目${n ? `，并清理 ${n} 个上传文件` : ""}`, "ok");
-          openProjectList();
-        } catch (err) {
-          setMessage(err.message);
-        }
+        const removed = await deleteProject(btn.dataset.del);
+        if (!removed) return;
+        close();
+        openProjectList();
       });
     });
   });
 }
 
+function openImportChooser() {
+  modal("导入新项目", (body, close) => {
+    body.innerHTML = `
+      <div class="import-actions">
+        <button id="import-pick" class="btn primary">选择媒体和字幕文件</button>
+        <button id="import-path" class="btn">按本机路径导入</button>
+      </div>
+      <p class="hint">新项目会单独保存。也可以直接把媒体和同名字幕拖进窗口。</p>
+      <input id="import-file-input" type="file" multiple accept=".mp4,.mkv,.mov,.avi,.webm,.flv,.ts,.m4v,.wmv,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus,.wma,.srt,.ass,.ssa" hidden>`;
+    const input = body.querySelector("#import-file-input");
+    body.querySelector("#import-pick").addEventListener("click", () => input.click());
+    input.addEventListener("change", () => {
+      const files = [...input.files];
+      close();
+      if (files.length) previewDroppedFiles(files);
+    });
+    body.querySelector("#import-path").addEventListener("click", () => {
+      close();
+      openPathImport();
+    });
+  });
+}
+
+/* Path import: for big files (browser upload cap) or files already on disk.
+   The server reads the paths directly — nothing is uploaded. */
+function openPathImport(closeList) {
+  modal("按本机路径导入", (body) => {
+    body.innerHTML = `
+      <p class="hint">直接读取本机文件路径，不经过浏览器上传（适合超过上传上限的视频）。</p>
+      <div class="field"><label>视频 / 音频路径</label><input id="imp-media" type="text" placeholder="例如：D:\\anime\\ep01.mkv"></div>
+      <div class="field"><label>字幕路径（SRT / ASS）</label><input id="imp-sub" type="text" placeholder="例如：D:\\anime\\ep01.ass"></div>
+    `;
+    setTimeout(() => body.querySelector("#imp-media")?.focus(), 30);
+  }, [
+    { label: "取消" },
+    {
+      label: "导入", primary: true, onClick: async (close) => {
+        const mediaPath = document.getElementById("imp-media").value.trim();
+        const subPath = document.getElementById("imp-sub").value.trim();
+        if (!mediaPath || !subPath) { setMessage("请填写媒体和字幕两个路径"); return; }
+        close();
+        try { closeList?.(); } catch { /* 项目库弹窗未开时忽略 */ }
+        try {
+          await previewPaths([[mediaPath, subPath]], async () => {
+            setBusy("正在导入…");
+            try {
+              const data = await API.post("/api/projects", {
+                media_path: mediaPath, subtitle_path: subPath,
+              });
+              await refreshMeta();
+              applyProject(data.project);
+              setMessage(`已导入「${data.project.name}」，共 ${data.project.segments.length} 条字幕。`, "ok");
+            } finally { setBusy(""); }
+          });
+        } catch (err) { setMessage(err.message); }
+      },
+    },
+  ]);
+}
+
 /* ------------------------------------------------------------------- init */
 
 /* Show the workspace shell with no project open (used on a cold start and after
-   deleting the current project) so the app always lands on the work page. */
+   deleting the current project) so the app always lands on the work page. The
+   shell is re-mounted from the template so no stale lanes / blocks / role chips
+   from the deleted project survive (`renderTrack`/`renderSide` return early when
+   there is no project, so they cannot clear the old DOM themselves). */
 function resetWorkspace() {
+  detachMedia();
   state.project = null; state.projectId = null; state.media = null;
   state.selection.clear(); state.undo = []; state.redo = [];
+  state.selectedId = null;
+  state.seekTarget = null;
+  state.pendingSeek = null;
+  state.blockNodes = new Map();
+  state.laneCache = null;
+  state.laneGroupsCache = null;
+  state.speakerUi = null;
+  state.roleMap = new Map();
+  state.queueCache = null;
   const stage = el("stage");
-  if (!stage.querySelector(".workspace")) {
-    stage.classList.remove("empty");
-    stage.replaceChildren(el("workspace-template").content.cloneNode(true));
-    bindWorkspace();
-  }
+  stage.classList.remove("empty");
+  stage.replaceChildren(el("workspace-template").content.cloneNode(true));
+  bindWorkspace();
+  // Empty-import hint lives inside the media host until the first project is
+  // mounted (mountMedia clears it).
   const host = el("media-host");
-  if (host) host.replaceChildren();
+  if (host) {
+    host.innerHTML = `
+      <div class="empty-import">
+        <p class="empty-title">拖入「视频/音频 + 字幕」开始</p>
+        <p class="hint">或</p>
+        <button id="btn-empty-path" class="btn ghost sm">按本机路径导入…</button>
+      </div>`;
+    host.querySelector("#btn-empty-path")?.addEventListener("click", () => openPathImport());
+  }
   renderAll();
   renderProjectSelect();
 }
 
 async function init() {
   bindGlobalListeners();
-  applyTheme();
   // Bind every chrome control up front. /api/state probes the detection engines
   // (importing torch can take several seconds on a cold start), and the UI must
   // stay responsive during that window instead of silently ignoring clicks.
-  el("btn-theme").addEventListener("click", toggleTheme);
-  el("btn-settings").addEventListener("click", openSettings);
   wireDragDrop();
-  wireWindowControls();
-  wireToolbarDrag();
-  el("btn-open-project").addEventListener("click", openProjectList);
+  el("btn-import").addEventListener("click", openImportChooser);
+  el("btn-init").addEventListener("click", initializeAll);
   el("btn-detect").addEventListener("click", () => {
     if (!state.project) { setMessage("请先导入项目"); return; }
     openDetectModal();
-  });
-  el("btn-roles").addEventListener("click", () => {
-    if (!state.project) { setMessage("请先导入项目"); return; }
-    openRoleManager();
   });
   el("btn-export").addEventListener("click", () => {
     if (!state.project) { setMessage("请先导入项目"); return; }
     openExportModal();
   });
   el("project-select").addEventListener("change", async (event) => {
-    if (!event.target.value) return;
-    const data = await API.get(`/api/projects/${event.target.value}`);
+    const value = event.target.value;
+    if (value === "__manage__") {
+      event.target.value = state.projectId || "";
+      openProjectList();
+      return;
+    }
+    if (value === "__delete__") {
+      event.target.value = state.projectId || "";
+      if (state.projectId) deleteProject(state.projectId);
+      return;
+    }
+    if (!value) return;
+    const data = await API.get(`/api/projects/${value}`);
     state.selection.clear();
     applyProject(data.project);
   });
@@ -3013,7 +2916,7 @@ async function init() {
     applyProject(data.project);
   }
   if (!state.meta.ffmpeg) {
-    setMessage("未找到 ffmpeg，导入视频与声纹提取将不可用。");
+    setMessage("未找到 ffmpeg，导入视频/音频与自动检测将不可用。");
   }
 }
 

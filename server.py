@@ -19,16 +19,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import apppaths
 import audio_features as af
-import dataset_export
 import diarize
 import jsonutil
 import media
 import project as store
-import roles as rolelib
-import subtitle_io as sio
-import transcribe
 
-BASE_DIR = apppaths.bundle_dir()
+BASE_DIR = apppaths.writable_dir()
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 MEDIA_MIME = {
@@ -55,7 +51,7 @@ def _within(path: str, root: str) -> bool:
 # --- client-facing views ----------------------------------------------------
 
 def role_view(role: dict) -> dict:
-    return rolelib.role_summary(role)
+    return store.role_view(role)
 
 
 def project_view(project: dict, include_segments: bool = True) -> dict:
@@ -71,10 +67,7 @@ def project_view(project: dict, include_segments: bool = True) -> dict:
         "detection_notes": project.get("detection_notes", []),
         "import_notes": project.get("import_notes", []),
         "cluster_notes": (project.get("diarization") or {}).get("notes", []),
-        "bilingual": project.get("bilingual", False),
-        "line_mode": project.get("line_mode"),
-        "line_info": project.get("line_info", {}),
-        "second_subtitle_path": project.get("second_subtitle_path"),
+        "mapping_pending": bool(project.get("mapping_pending")),
         "stats": store.stats(project),
         "roles": [role_view(role) for role in project["roles"]],
         "exports": project.get("exports", []),
@@ -92,11 +85,12 @@ def project_view(project: dict, include_segments: bool = True) -> dict:
                 "start": segment["start"],
                 "end": segment["end"],
                 "text": segment["text"],
-                "translation": segment.get("translation", ""),
                 "speaker_id": segment.get("speaker_id"),
                 "speaker_name": names.get(segment.get("speaker_id")),
                 "color": colors.get(segment.get("speaker_id")),
                 "confidence": segment.get("confidence"),
+                "cluster": segment.get("cluster"),
+                "ambiguous": segment.get("ambiguous", False),
                 "status": segment.get("status", "pending"),
                 "note": segment.get("note"),
             }
@@ -109,6 +103,23 @@ def project_view(project: dict, include_segments: bool = True) -> dict:
         view["cluster_to_role"] = {
             str(k): v for k, v in (project.get("cluster_to_role") or {}).items()
         }
+        previews = {}
+        for turn in turns:
+            cluster = turn.get("cluster")
+            if cluster is None:
+                continue
+            key = str(int(cluster))
+            entry = previews.setdefault(key, {"cluster": int(cluster), "seconds": 0.0,
+                                              "turns": 0, "samples": []})
+            duration = max(0.0, turn["end"] - turn["start"])
+            entry["seconds"] += duration
+            entry["turns"] += 1
+            if len(entry["samples"]) < 3 and duration >= 0.5:
+                cue = next((seg for seg in project["segments"]
+                            if min(seg["end"], turn["end"]) > max(seg["start"], turn["start"])), None)
+                entry["samples"].append({"start": turn["start"], "end": turn["end"],
+                                         "text": cue["text"] if cue else ""})
+        view["cluster_preview"] = sorted(previews.values(), key=lambda item: item["cluster"])
     return view
 
 
@@ -116,58 +127,54 @@ def state_payload() -> dict:
     return {
         "engines": diarize.engine_availability(),
         "formats": [{"id": key, "label": label}
-                    for key, label in dataset_export.FORMAT_LABELS.items()],
+                    for key, label in store.FORMAT_LABELS.items()],
         "projects": store.list_projects(),
-        "library": [
-            {
-                "library_id": entry["library_id"],
-                "name": entry["name"],
-                "color": entry["color"],
-                "embedder": entry.get("embedder", "builtin"),
-                "has_voiceprint": bool(entry.get("embedding")),
-                "sample_count": len(entry.get("samples") or []),
-            }
-            for entry in store.load_library()
-        ],
-        "asr": transcribe.availability(),
-        "voiceprint_models": diarize.voiceprint_profiles(),
-        "device": diarize.device_info(),
-        "settings": store.public_settings(),
-        "default_threshold": store.load_settings()["threshold"],
         "ffmpeg": bool(media.FFMPEG),
+        # Single source of truth for droppable extensions (the frontend filters
+        # dropped files with these; dot-less to match path suffixes).
+        "accept": {
+            "media": sorted(e.lstrip(".") for e in
+                            (media._VIDEO_EXTENSIONS | media._AUDIO_EXTENSIONS)),
+            "subtitle": sorted(e.lstrip(".") for e in store._SUB_EXT),
+        },
+        "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
     }
 
 
 # --- waveform peaks (for the timeline track) --------------------------------
 
+# Peak computation decodes the whole file — minutes on first hit for a long
+# episode. One lock serialises: a warm-up thread and a GET never run ffmpeg on
+# the same project twice, and concurrent GETs queue instead of racing writes.
+_PEAKS_LOCK = threading.Lock()
+
+
 def peaks_for(project: dict, buckets: int = 1200) -> list[float]:
-    cache = os.path.join(store.WORK_DIR, f"{project['id']}.peaks.json")
-    try:
-        payload = store._read_json(cache, {})
-        if payload.get("buckets") == buckets:
-            return payload["peaks"]
-    except Exception:
-        pass
-    wav_path = store.work_wav(project)
-    signal, _rate = af.read_wav(wav_path, media.AUDIO_SAMPLE_RATE)
-    peaks = af.waveform_peaks(signal, buckets)
-    try:
-        # Atomic: a concurrent GET must never read a half-written peaks file.
-        store._write_json(cache, {"buckets": buckets, "peaks": peaks})
-    except OSError:
-        pass
-    return peaks
+    with _PEAKS_LOCK:
+        os.makedirs(store.project_work_dir(project["id"]), exist_ok=True)
+        cache = os.path.join(store.project_work_dir(project["id"]),
+                             f"{project['id']}.peaks.json")
+        try:
+            payload = store._read_json(cache, {})
+            if payload.get("buckets") == buckets:
+                return payload["peaks"]
+        except Exception:
+            pass
+        wav_path = store.work_wav(project)
+        signal, _rate = af.read_wav(wav_path, media.AUDIO_SAMPLE_RATE)
+        peaks = af.waveform_peaks(signal, buckets)
+        try:
+            # Atomic: a concurrent GET must never read a half-written peaks file.
+            store._write_json(cache, {"buckets": buckets, "peaks": peaks})
+        except OSError:
+            pass
+        return peaks
 
 
 # --- request handler --------------------------------------------------------
 
 class QuietHTTPServer(ThreadingHTTPServer):
-    """ThreadingHTTPServer that ignores client-side connection aborts.
-
-    The webview aborts in-flight requests all the time (page reloads, video
-    seeking, range requests), which otherwise prints a full traceback per
-    connection reset. Those are not server errors.
-    """
+    """ThreadingHTTPServer that ignores client-side connection aborts."""
 
     daemon_threads = True
 
@@ -180,7 +187,16 @@ class QuietHTTPServer(ThreadingHTTPServer):
 class Handler(BaseHTTPRequestHandler):
     server_version = "SpeakerAttribution/1.0"
     protocol_version = "HTTP/1.1"
+    # Serialises all state mutations: handlers do load -> mutate -> save, and
+    # ThreadingHTTPServer would otherwise let two edits clobber each other.
     _mutation_lock = threading.RLock()
+    # One lock per project prevents duplicate synchronous detections. Detection
+    # also holds the mutation lock so a later manual edit cannot be overwritten
+    # by a stale project snapshot when the long-running task finishes.
+    _detect_locks: dict[str, threading.Lock] = {}
+    _detect_locks_guard = threading.Lock()
+    _detect_jobs: dict[str, dict] = {}
+    _detect_jobs_guard = threading.Lock()
 
     # -- helpers ------------------------------------------------------------
     def log_message(self, fmt, *args):
@@ -239,12 +255,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, **state_payload()})
             if path == "/api/projects":
                 return self._json({"ok": True, "projects": store.list_projects()})
-            if path == "/api/library":
-                return self._json({"ok": True,
-                                   "library": state_payload()["library"]})
 
-            if path == "/api/settings":
-                return self._json({"ok": True, "settings": store.public_settings()})
+            match = re.fullmatch(r"/api/projects/([\w.-]+)/detect/status", path)
+            if match:
+                with self._detect_jobs_guard:
+                    job = dict(self._detect_jobs.get(match.group(1), {"state": "idle"}))
+                return self._json({"ok": True, "job": job})
 
             match = re.fullmatch(r"/api/projects/([\w.-]+)", path)
             if match:
@@ -271,7 +287,7 @@ class Handler(BaseHTTPRequestHandler):
 
             return self._static(path)
         except ConnectionError:
-            return  # 客户端（webview）主动断开：刷新/拖动/取消，非服务端错误
+            return  # client (browser) aborted: refresh/seek/cancel, not an error
         except FileNotFoundError:
             return self._error("项目或文件不存在", 404)
         except Exception as exc:
@@ -281,12 +297,7 @@ class Handler(BaseHTTPRequestHandler):
     do_HEAD = do_GET
 
     def _receive_upload(self, name: str, length: int) -> str:
-        """Stream the request body to an upload file in 1 MB chunks.
-
-        The old code did ``rfile.read(length)`` into memory first, so dropping a
-        multi-GB video on the window could OOM the server. Chunking keeps peak
-        memory at the buffer size regardless of file size.
-        """
+        """Stream the request body to an upload file in 1 MB chunks."""
         target = store._upload_target(name)
         remaining = length
         try:
@@ -331,24 +342,81 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
-        # Serialize all state mutations: handlers do load -> mutate -> save, and
-        # ThreadingHTTPServer would otherwise let two edits clobber each other.
+        try:
+            payload = self._read_json()
+        except ValueError as exc:
+            return self._error(str(exc), 400)
+        match = re.fullmatch(r"/api/projects/([\w.-]+)/detect/start", path)
+        if match:
+            return self._start_detect(match.group(1), payload)
+        match = re.fullmatch(r"/api/projects/([\w.-]+)/detect", path)
+        if match:
+            with self._detect_locks_guard:
+                lock = self._detect_locks.setdefault(match.group(1), threading.Lock())
+            with lock:
+                with self._mutation_lock:
+                    return self._dispatch(path, payload)
+        # All other mutations stay under the global lock (fast path).
         with self._mutation_lock:
-            try:
-                payload = self._read_json()
-                return self._route_post(path, payload)
-            except ConnectionError:
-                return
-            except FileNotFoundError as exc:
-                return self._error(str(exc), 404)
-            except (KeyError, ValueError) as exc:
-                return self._error(str(exc), 400)
-            except Exception as exc:
-                traceback.print_exc()
-                return self._error(f"{type(exc).__name__}: {exc}", 500)
+            return self._dispatch(path, payload)
+
+    def _dispatch(self, path: str, payload: dict):
+        try:
+            return self._route_post(path, payload)
+        except ConnectionError:
+            return
+        except FileNotFoundError as exc:
+            return self._error(str(exc), 404)
+        except (KeyError, ValueError) as exc:
+            return self._error(str(exc), 400)
+        except Exception as exc:
+            traceback.print_exc()
+            return self._error(f"{type(exc).__name__}: {exc}", 500)
 
     def do_PATCH(self):
         self.do_POST()
+
+    @classmethod
+    def _set_detect_job(cls, project_id: str, **changes) -> None:
+        with cls._detect_jobs_guard:
+            cls._detect_jobs[project_id] = {**cls._detect_jobs.get(project_id, {}), **changes}
+
+    def _start_detect(self, project_id: str, payload: dict) -> None:
+        try:
+            store.load(project_id)
+            min_speakers = max(1, int(payload.get("min_speakers") or 1))
+            max_speakers = max(1, int(payload.get("max_speakers") or 6))
+            if min_speakers > max_speakers:
+                return self._error("最少人数不能超过最多人数")
+        except FileNotFoundError:
+            return self._error("项目不存在", 404)
+        except ValueError:
+            return self._error("说话人数必须是整数")
+        with self._detect_jobs_guard:
+            if self._detect_jobs.get(project_id, {}).get("state") == "running":
+                return self._error("该项目已有检测任务", 409)
+            self._detect_jobs[project_id] = {"state": "running", "stage": "等待开始"}
+
+        def work():
+            try:
+                with self._mutation_lock:
+                    self._set_detect_job(project_id, stage="正在读取项目")
+                    project = store.load(project_id)
+                    store.run_detection(
+                        project, engine=payload.get("engine") or "pyannote",
+                        min_speakers=min_speakers, max_speakers=max_speakers,
+                        overwrite_manual=bool(payload.get("overwrite_manual", False)),
+                        conservative=bool(payload.get("conservative", False)),
+                        progress=lambda stage: self._set_detect_job(project_id, stage=stage),
+                    )
+                self._set_detect_job(project_id, state="done", stage="检测完成")
+            except Exception as exc:
+                traceback.print_exc()
+                self._set_detect_job(project_id, state="failed", stage="检测失败",
+                                     error=f"{type(exc).__name__}: {exc}")
+
+        threading.Thread(target=work, daemon=True).start()
+        return self._json({"ok": True, "job": {"state": "running", "stage": "等待开始"}}, 202)
 
     def do_DELETE(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -368,12 +436,6 @@ class Handler(BaseHTTPRequestHandler):
                 store.delete_role(project, int(match.group(2)))
                 store.save(project)
                 return self._json({"ok": True, "project": project_view(project)})
-            match = re.fullmatch(r"/api/library/([\w.-]+)", path)
-            if match:
-                library = [r for r in store.load_library()
-                           if r["library_id"] != match.group(1)]
-                store.save_library(library)
-                return self._json({"ok": True})
             return self._error("not found", 404)
         except ConnectionError:
             return
@@ -384,72 +446,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(f"{type(exc).__name__}: {exc}", 500)
 
     def _route_post(self, path: str, payload: dict):
+        if path == "/api/import/preview":
+            return self._json({"ok": True, "preview": store.preview_import(
+                payload.get("media_path", ""), payload.get("subtitle_path", ""))})
         if path == "/api/projects":
             project = store.create(
                 payload.get("media_path", ""),
                 payload.get("subtitle_path", ""),
                 payload.get("name"),
-                second_subtitle_path=payload.get("second_subtitle_path") or None,
-                line_mode=payload.get("line_mode") or "auto",
             )
+            # Warm the waveform peaks in the background so the first timeline
+            # mount never blocks behind the full-file decode.
+            threading.Thread(target=peaks_for, args=(project,), daemon=True).start()
             return self._json({"ok": True, "project": project_view(project)})
 
-        if path == "/api/library":
-            entry, action = store.add_library_role(
-                payload.get("name") or "未命名",
-                payload.get("color"),
-                payload.get("embedding"),
-            )
-            return self._json({"ok": True, "action": action, "library_role": entry,
-                               "library": state_payload()["library"]})
-
-        if path == "/api/library_dedupe":
-            result = store.dedupe_library()
-            return self._json({"ok": True, "removed": result["removed"],
-                               "kept": result["kept"],
-                               "library": state_payload()["library"]})
-
-        if path == "/api/transcribe":
-            media_path = store.normalize_path(payload.get("media_path", ""))
-            if not os.path.isfile(media_path):
-                return self._error(f"找不到媒体文件：{media_path}", 404)
-            cfg = store.load_settings()
-            segments, language = transcribe.transcribe(
-                media_path,
-                model_size=payload.get("model_size") or cfg["asr_model"],
-                language=payload.get("language") or payload.get("asr_language")
-                or cfg["asr_language"] or None,
-            )
-            stem = payload.get("name") or os.path.splitext(os.path.basename(media_path))[0]
-            target_dir = os.path.join(store.DATA_DIR, "asr")
-            os.makedirs(target_dir, exist_ok=True)
-            srt_path = os.path.join(target_dir, f"{store.slug(stem)}.srt")
-            with open(srt_path, "w", encoding="utf-8") as handle:
-                handle.write(sio.write_srt(segments, {}))
-            return self._json({
-                "ok": True,
-                "subtitle_path": srt_path,
-                "count": len(segments),
-                "language": language,
-            })
-
-        if path == "/api/settings":
-            return self._json({"ok": True, "settings": store.save_settings(payload)})
-
-        if path == "/api/maintenance":
-            action = payload.get("action")
-            if action == "clean_work":
-                removed = 0
-                for name in os.listdir(store.WORK_DIR):
-                    try:
-                        os.remove(os.path.join(store.WORK_DIR, name))
-                        removed += 1
-                    except OSError:
-                        pass
-                return self._json({"ok": True, "removed": removed})
-            if action == "clean_uploads":
-                return self._json({"ok": True, "removed": store.clean_orphan_uploads()})
-            return self._error("未知维护操作", 400)
+        if path == "/api/initialize":
+            return self._json({"ok": True, **store.reset_all()})
 
         match = re.fullmatch(r"/api/projects/([\w.-]+)/(\w[\w-]*)", path)
         if not match:
@@ -458,33 +470,22 @@ class Handler(BaseHTTPRequestHandler):
         project = store.load(project_id)
 
         if action == "detect":
-            cfg = store.load_settings()
-            threshold = payload.get("threshold")
             project = store.run_detection(
                 project,
-                engine=payload.get("engine") or cfg["default_engine"],
-                min_speakers=int(payload.get("min_speakers") or cfg["min_speakers"]),
-                max_speakers=int(payload.get("max_speakers") or cfg["max_speakers"]),
-                threshold=cfg["threshold"] if threshold is None else float(threshold),
+                engine=payload.get("engine") or "pyannote",
+                min_speakers=int(payload.get("min_speakers") or 1),
+                max_speakers=int(payload.get("max_speakers") or 6),
                 overwrite_manual=bool(payload.get("overwrite_manual", False)),
-                sweep=bool(payload.get("sweep", False)),
-                consensus=bool(payload.get("consensus", False)),
-                separate_vocals=bool(payload.get("separate_vocals",
-                                                 cfg.get("separate_vocals", False))),
+                conservative=bool(payload.get("conservative", False)),
             )
             return self._json({"ok": True, "project": project_view(project)})
 
-        if action == "translation":
-            store.set_translation(project, store.normalize_path(payload.get("path", "")))
-            store.save(project)
+        if action == "mapping":
+            project = store.confirm_cluster_mapping(project, payload.get("choices") or {})
             return self._json({"ok": True, "project": project_view(project)})
 
-        if action == "line_mode":
-            mode = payload.get("mode") or "auto"
-            if mode == "auto":
-                mode = store.sio.detect_line_mode(project["segments"])["suggested"]
-            store.set_line_mode(project, mode)
-            store.save(project)
+        if action == "realign":
+            project = store.realign_detection(project)
             return self._json({"ok": True, "project": project_view(project)})
 
         if action == "reset_auto":
@@ -494,13 +495,17 @@ class Handler(BaseHTTPRequestHandler):
                                "project": project_view(project)})
 
         if action == "bulk":
-            changed = store.bulk_set(project, payload.get("ids") or [],
+            ids = payload.get("ids") or []
+            changed = store.bulk_set(project, ids,
                                      payload.get("speaker_id"),
                                      status=payload.get("status", "manual"),
                                      confidence=payload.get("confidence"))
             store.save(project)
+            selected = set(int(value) for value in ids)
             return self._json({"ok": True, "changed": changed,
-                               "project": project_view(project)})
+                               "segments": [segment for segment in project["segments"]
+                                            if segment["id"] in selected],
+                               "stats": store.stats(project)})
 
         if action == "roles":
             role = store.add_role(project, payload.get("name") or "新角色",
@@ -518,53 +523,34 @@ class Handler(BaseHTTPRequestHandler):
         if action == "roles_update":
             role = store.update_role(
                 project, int(payload["role_id"]), payload.get("name"),
-                payload.get("color"), payload.get("type"),
+                payload.get("color"),
             )
             store.save(project)
             return self._json({"ok": True, "role": role_view(role),
                                "project": project_view(project)})
 
-        if action == "roles_delete_pending":
-            removed = store.delete_pending_roles(project)
-            store.save(project)
-            return self._json({"ok": True, "removed": removed,
-                               "project": project_view(project)})
-
-        if action == "enroll":
-            role, notes = store.enroll_role(
-                project, int(payload["role_id"]), float(payload["start"]),
-                float(payload["end"]), also_library=bool(payload.get("also_library")),
-            )
+        if action == "roles_voiceprint":
+            role = store.enroll_role_voiceprint(
+                project, int(payload["role_id"]), payload.get("segment_ids"))
             store.save(project)
             return self._json({"ok": True, "role": role_view(role),
-                               "notes": notes, "project": project_view(project)})
+                               "project": project_view(project)})
 
         if action == "segments":
-            store.set_segment(project, int(payload["segment_id"]),
+            segment_id = int(payload["segment_id"])
+            store.set_segment(project, segment_id,
                               payload.get("speaker_id"))
             store.save(project)
-            return self._json({"ok": True, "project": project_view(project)})
+            segment = next(segment for segment in project["segments"]
+                           if segment["id"] == segment_id)
+            return self._json({"ok": True, "segments": [segment],
+                               "stats": store.stats(project)})
 
         if action == "export":
             written = store.export(project, payload.get("formats") or ["srt"],
                                    payload.get("options") or {})
             return self._json({"ok": True, "files": written,
                                "project": project_view(project)})
-
-        if action == "promote":
-            role = next((r for r in project["roles"]
-                         if r["id"] == int(payload["role_id"])), None)
-            if role is None:
-                return self._error("角色不存在", 404)
-            _, lib_action = store.add_library_role(
-                role["name"], role["color"],
-                role.get("embedding"), role.get("samples"),
-                embedder=role.get("embedder", "builtin"))
-            role["in_library"] = True
-            store.save(project)
-            return self._json({"ok": True, "action": lib_action,
-                               "project": project_view(project),
-                               "library": state_payload()["library"]})
 
         return self._error(f"未知操作：{action}", 404)
 
@@ -620,12 +606,12 @@ class Handler(BaseHTTPRequestHandler):
                 remaining -= len(chunk)
 
     def _download(self, project_id: str, filename: str) -> None:
-        folder = os.path.join(store.EXPORT_DIR, project_id)
+        folder = store.project_export_dir(project_id)
         path = os.path.normpath(os.path.join(folder, filename))
         if not _within(path, folder) or not os.path.isfile(path):
             return self._error("导出文件不存在", 404)
         mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
-        if path.endswith((".md", ".csv", ".jsonl", ".rttm", ".srt", ".vtt", ".ass")):
+        if path.endswith((".srt", ".ass")):
             mime = "text/plain; charset=utf-8"
         with open(path, "rb") as handle:
             body = handle.read()
@@ -635,7 +621,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8770) -> None:
-    """Run the blocking HTTP server. Used by ``main`` and by a frozen shell."""
+    """Run the blocking HTTP server."""
     store._ensure_dirs()
 
     # Probing engines imports torch (several seconds). Do it off the request path

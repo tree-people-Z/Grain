@@ -1,71 +1,37 @@
-/* ============================================================
-   Grain · 设计系统 v5 "Cupertino"
-   macOS 材质：中性色板 · 双主题 · 可切换强调色 · 毛玻璃 · 分段控件
+﻿/* ============================================================
+   Grain 路 璁捐绯荤粺 v5 "Cupertino"
+   macOS 鏉愯川锛氫腑鎬ц壊鏉?路 鍙屼富棰?路 鍙垏鎹㈠己璋冭壊 路 姣涚幓鐠?路 鍒嗘鎺т欢
    ============================================================ */
 
 :root {
-  --bg0: #151517;
-  --bg1: #1e1e21;
-  --bg2: #26262a;
-  --bg3: #2f2f35;
-  --line: #2c2c31;
-  --line-2: #3b3b42;
-  --text: #f5f5f7;
-  --dim: #c9c9cf;
-  --muted: #8e8e93;
-  --good: #30c463;
-  --warn: #ffc94d;
-  --bad: #ff6b6b;
-  --pending: #98a0af;
+  --bg0: #0f1416;
+  --bg1: #151c1f;
+  --bg2: #1c262a;
+  --bg3: #263338;
+  --line: #283439;
+  --line-2: #3a484e;
+  --text: #eef5f3;
+  --dim: #c2cfcc;
+  --muted: #84928f;
+  --good: #55c28e;
+  --warn: #e7b969;
+  --bad: #ee7776;
+  --pending: #93a2a8;
 
-  --accent: #8b7cff;
-  --accent-2: #5ea2ef;
-  --grad: linear-gradient(135deg, #8b7cff 0%, #5ea2ef 100%);
+  --accent: #68c9ae;
+  --accent-2: #86b9d3;
+  --grad: linear-gradient(135deg, #68c9ae 0%, #86b9d3 100%);
 
   --block-text: rgba(255,255,255,.82);
-  --block-current-bg: rgba(32,32,37,.95);
-  --toolbar-bg: rgba(30,30,34,.86);
-  --shadow-1: 0 1px 2px rgba(0,0,0,.3), 0 10px 32px rgba(0,0,0,.2);
-  --shadow-pop: 0 30px 90px rgba(0,0,0,.55), 0 6px 24px rgba(0,0,0,.4);
+  --block-current-bg: rgba(27,39,42,.96);
+  --toolbar-bg: rgba(18,25,27,.92);
+  --shadow-1: 0 1px 2px rgba(0,0,0,.24), 0 12px 28px rgba(0,0,0,.16);
+  --shadow-pop: 0 30px 90px rgba(0,0,0,.52), 0 6px 24px rgba(0,0,0,.35);
 
-  --radius: 14px;
-  --radius-sm: 9px;
+  --radius: 12px;
+  --radius-sm: 8px;
   --font: "Noto Sans SC Variable", "Noto Sans SC", -apple-system, "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, monospace;
-}
-
-:root[data-accent="blue"]  { --accent:#4da3ff; --accent-2:#6ec5ff; --grad:linear-gradient(135deg,#4da3ff,#6ec5ff); }
-:root[data-accent="rose"]  { --accent:#ff6b8a; --accent-2:#ff9f6b; --grad:linear-gradient(135deg,#ff6b8a,#ff9f6b); }
-:root[data-accent="green"] { --accent:#2ec27e; --accent-2:#7bd88f; --grad:linear-gradient(135deg,#2ec27e,#7bd88f); }
-
-:root[data-theme="light"] {
-  /* Pure white canvas. Hierarchy comes from hairline borders and a very light
-     shadow under each panel (Apple-style), never from tinting the surfaces. */
-  --bg0: #ffffff;
-  --bg1: #ffffff;
-  --bg2: #fafafa;
-  --bg3: #f2f2f2;
-  --line: #ededf0;
-  --line-2: #e0e0e4;
-  --text: #1a1a1c;
-  --dim: #52525a;
-  /* #8e8e94 only reached 3.3:1 on pure white; darken so secondary copy stays
-     legible while remaining visibly quieter than --dim. */
-  --muted: #6e6e76;
-  --pending: #9a9aa2;
-
-  /* Deeper, calmer accent: the dark-theme violet looks like candy on white. */
-  --accent: #6b5ce7;
-  --accent-2: #4a8fe0;
-  --grad: linear-gradient(135deg, #6b5ce7 0%, #4a8fe0 100%);
-
-  --good: #28a745;
-  --bad: #d64545;
-  --block-text: rgba(20,20,24,.88);
-  --block-current-bg: #ffffff;
-  --toolbar-bg: rgba(255,255,255,.78);
-  --shadow-1: 0 1px 1.5px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.05);
-  --shadow-pop: 0 12px 40px rgba(0,0,0,.14), 0 2px 8px rgba(0,0,0,.08);
 }
 
 * { box-sizing: border-box; }
@@ -83,6 +49,16 @@ html, body {
 }
 
 body { display: flex; flex-direction: column; overflow: hidden; }
+
+/* Empty workspace: import hint inside the media panel */
+.empty-import {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; gap: 8px;
+  align-items: center; justify-content: center;
+  text-align: center; color: var(--muted);
+}
+.empty-import .empty-title { font-size: 14px; font-weight: 600; color: var(--dim); margin: 0; }
+.empty-import p { margin: 0; }
 
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .spacer { flex: 1; }
@@ -134,7 +110,6 @@ body { display: flex; flex-direction: column; overflow: hidden; }
   font-family: var(--mono); font-size: 10px; color: var(--muted);
   background: var(--bg0); border: 1px solid var(--line-2); border-radius: 4px; padding: 0 4px;
 }
-body.hide-kbd kbd, body.hide-kbd .speaker-btn .key { display: none; }
 
 /* ------------------------------------------------ toolbar */
 
@@ -148,20 +123,6 @@ body.hide-kbd kbd, body.hide-kbd .speaker-btn .key { display: none; }
   z-index: 10;
 }
 .traffic { display: none; }
-
-/* 无边框窗口的自绘窗口按钮：只在桌面壳（pywebview）里出现，贴在导航栏右端。 */
-.win-controls { display: none; align-items: center; gap: 2px; margin-left: 2px; }
-body.desktop-shell .win-controls { display: flex; }
-.win-btn {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 34px; height: 34px; padding: 0;
-  background: transparent; border: none; border-radius: 8px;
-  color: var(--dim); cursor: pointer;
-  transition: background .14s, color .14s;
-}
-.win-btn:hover { background: var(--bg3); color: var(--text); }
-.win-btn:active { transform: scale(.96); }
-.win-btn.close:hover { background: var(--bad); color: #fff; }
 
 .brand { display: flex; align-items: center; gap: 10px; margin-right: 8px; }
 .brand-mark {
@@ -180,11 +141,6 @@ body.desktop-shell .win-controls { display: flex; }
 .toolbar-group { display: flex; align-items: center; gap: 7px; }
 .toolbar-group + .toolbar-group { margin-left: 6px; padding-left: 14px; border-left: 1px solid var(--line); }
 .toolbar-group.tools { gap: 4px; }
-
-/* theme toggle shows one glyph at a time; both live in the same button */
-#btn-theme .ico-moon { display: none; }
-:root[data-theme="light"] #btn-theme .ico-sun { display: none; }
-:root[data-theme="light"] #btn-theme .ico-moon { display: block; }
 
 .select-wrap select {
   height: 32px; max-width: 240px;
@@ -212,22 +168,20 @@ body.desktop-shell .win-controls { display: flex; }
 /* ------------------------------------------------ workspace grid */
 
 /* Horizontal space is plentiful and vertical space is scarce, while a 16:9
-   picture is height-hungry. So the top band is split into three columns —
-   picture, current cue, speaker library — and the two components that genuinely
+   picture is height-hungry. So the top band is split into three columns 鈥?
+   picture, current cue, speaker library 鈥?and the two components that genuinely
    need full width (timeline, clip list) span the whole grid beneath it. */
 .workspace {
   display: grid;
   grid-template-columns:
-    minmax(360px, var(--media-col, 496px))
-    minmax(280px, 1fr)
+    minmax(300px, var(--media-natural, 480px))
+    minmax(0, 1fr)
     minmax(240px, 300px);
   grid-template-rows: minmax(240px, var(--media-rows, 34vh))
-                     auto
-                     minmax(110px, 1fr);
+                     minmax(220px, 1fr);
   grid-template-areas:
-    "media cue   side"
-    "track track track"
-    "queue queue queue";
+    "media queue side"
+    "track track side";
   gap: 10px; padding: 10px;
   height: 100%;
   overflow-x: hidden;
@@ -245,7 +199,6 @@ body.desktop-shell .win-controls { display: flex; }
 .media-panel  { grid-area: media; }
 .side-panel   { grid-area: side; }
 .track-panel  { grid-area: track; }
-.cue-panel    { grid-area: cue; }
 .queue-panel  { grid-area: queue; }
 
 .panel-head {
@@ -264,6 +217,11 @@ body.desktop-shell .win-controls { display: flex; }
 .timecode { font-size: 11.5px; color: var(--dim); white-space: nowrap; }
 .media-panel .panel-head { gap: 7px; }
 .zoom { font-size: 11.5px; color: var(--muted); min-width: 38px; text-align: center; }
+.zoom-fit {
+  background: none; border: 1px solid transparent; border-radius: 7px;
+  cursor: pointer; padding: 3px 7px;
+}
+.zoom-fit:hover { border-color: var(--line); color: var(--text); }
 
 /* toggle switch (macOS style) */
 .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); cursor: pointer; user-select: none; }
@@ -285,7 +243,6 @@ body.desktop-shell .win-controls { display: flex; }
 /* ------------------------------------------------ media */
 
 .media-host { flex: 1; background: #000; position: relative; min-height: 120px; overflow: hidden; }
-:root[data-theme="light"] .media-host { background: #1a1a1c; }
 /* Fit the video box to the panel instead of stretching the panel to the video:
    a 16:9 picture inside a taller grid cell would letterbox on all four sides. */
 /* Absolute positioning guarantees the media box is exactly the panel size, so
@@ -316,10 +273,10 @@ body.desktop-shell .win-controls { display: flex; }
 
 .ruler { display: block; width: 100%; height: 20px; }
 
-.track-lanes { display: flex; flex-direction: column; gap: 3px; margin: 3px 0; }
+.track-lanes { display: flex; flex-direction: column; gap: 2px; margin: 3px 0; }
 .track-lanes:empty { display: none; }
 .lane {
-  position: relative; height: 22px; border-radius: 5px;
+  position: relative; height: 18px; border-radius: 5px;
   background: color-mix(in srgb, var(--pending) 7%, transparent);
 }
 .lane-label {
@@ -363,7 +320,7 @@ body.desktop-shell .win-controls { display: flex; }
   border-left: 3px solid var(--pending);
   cursor: pointer;
   display: flex; flex-direction: column; gap: 1px;
-  transition: transform .16s ease, box-shadow .16s ease, top .16s ease, height .16s ease, background .16s ease;
+  transition: box-shadow .16s ease, background .16s ease;
 }
 .track-block:hover { background: color-mix(in srgb, var(--pending) 22%, transparent); }
 .track-block .tb-name {
@@ -373,11 +330,6 @@ body.desktop-shell .win-controls { display: flex; }
 .track-block .tb-text {
   font-size: 10.5px; line-height: 1.3; color: var(--block-text);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-}
-.track-block .tb-translation {
-  font-size: 9.5px; line-height: 1.25; color: var(--muted);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  font-style: italic;
 }
 /* Confidence is a corner badge so it never competes with the cue text. */
 .track-block .tb-conf {
@@ -399,16 +351,16 @@ body.desktop-shell .win-controls { display: flex; }
 .track-block.selected { outline: 2px solid var(--accent-2); outline-offset: 1px; }
 
 .track-block.current {
-  top: 0; height: 84px; z-index: 5;
+  z-index: 5;
   background: var(--block-current-bg);
-  transform: scale(1.015);
-  transform-origin: center;
-  will-change: transform;
-  box-shadow: 0 0 0 2px var(--cur-color, var(--accent)), 0 12px 34px rgba(0,0,0,.4);
+  /* No size change for the current block: growing it (taller than its
+     neighbours) made it overlap them and left a lingering frame. Highlight with
+     an outline + tint only, so nothing moves or resizes. */
+  box-shadow: 0 0 0 2px var(--cur-color, var(--accent)), 0 8px 22px rgba(0,0,0,.38);
 }
 
 .track-block.reviewed::after {
-  content: "✓";
+  content: "鉁?;
   position: absolute; top: 4px; right: 6px;
   font-size: 9.5px; line-height: 1; color: #fff;
   background: var(--good); border-radius: 999px; padding: 2px 4.5px;
@@ -417,10 +369,9 @@ body.desktop-shell .win-controls { display: flex; }
 
 .playhead {
   position: absolute; left: 0; top: 24px; bottom: 4px; width: 2px;
+  margin-left: -1px; /* centre the 2px line on the time (no transform layer) */
   background: var(--accent);
   border-radius: 2px;
-  transform: translateX(-1px);
-  will-change: transform;
   pointer-events: none;
   box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 70%, transparent);
   display: none;
@@ -473,8 +424,11 @@ body.desktop-shell .win-controls { display: flex; }
 .cue-bar {
   display: flex; align-items: stretch; gap: 16px;
   padding: 9px 14px;
-  flex: 1; min-height: 0;
+  flex: none;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg2) 45%, transparent);
 }
+.track-panel .current-text { max-height: 3.4em; }
 .cue-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
 .cue-head { display: flex; align-items: center; gap: 10px; }
 .current-range { font-size: 11.5px; color: var(--accent); letter-spacing: .3px; }
@@ -483,13 +437,8 @@ body.desktop-shell .win-controls { display: flex; }
   letter-spacing: .1px;
   overflow: auto;
 }
-.current-translation {
-  font-size: 13.5px; line-height: 1.5; color: var(--dim);
-  padding-left: 10px; border-left: 2px solid var(--line-2);
-  overflow: auto;
-}
 .cue-assign {
-  width: 420px; flex: none; display: flex; flex-direction: column; gap: 8px;
+  width: clamp(360px, 46%, 760px); flex: none; display: flex; flex-direction: column; gap: 8px;
   border-left: 1px solid var(--line); padding-left: 18px;
 }
 .assign-head { display: flex; align-items: baseline; gap: 8px; }
@@ -542,64 +491,30 @@ body.desktop-shell .win-controls { display: flex; }
 
 /* ------------------------------------------------ queue */
 
-.filters {
-  display: inline-flex; gap: 2px;
-  background: var(--bg3); border-radius: 9px; padding: 2px;
-}
-.chip {
-  height: 24px; padding: 0 11px; border-radius: 7px;
-  background: transparent; border: none; color: var(--muted);
-  font-size: 11.5px; font-weight: 600; font-family: inherit; cursor: pointer;
-  transition: all .14s;
-}
-.chip:hover { color: var(--text); }
-.chip.active {
-  background: var(--bg1); color: var(--text);
-  box-shadow: 0 1px 4px rgba(0,0,0,.22);
-}
-:root[data-theme="light"] .chip.active { box-shadow: 0 1px 4px rgba(0,0,0,.14); }
-
-.search {
-  height: 28px; width: 170px;
-  background: var(--bg2); color: var(--text);
-  border: 1px solid var(--line); border-radius: 9px;
-  padding: 0 13px; font-size: 12px; font-family: inherit;
-  transition: width .18s, border-color .14s, background .14s;
-}
-.search:focus { width: 220px; border-color: var(--accent); outline: none; }
-.search::placeholder { color: var(--muted); }
-
-.lang-seg {
-  display: inline-flex; gap: 2px; margin-right: 8px;
-  background: var(--bg3); border-radius: 9px; padding: 2px;
-}
-.lang-seg button {
-  border: none; background: transparent; color: var(--muted);
-  height: 24px; padding: 0 11px; border-radius: 7px;
-  font-size: 11.5px; font-weight: 600; font-family: inherit; cursor: pointer;
-  transition: all .14s;
-}
-.lang-seg button:hover { color: var(--text); }
-.lang-seg button.active { background: var(--bg1); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,.22); }
-
-.queue { overflow: auto; flex: 1; padding: 2px 0; }
+.queue { overflow: auto; flex: 1; padding: 0; }
+.queue-filters { display: flex; gap: 3px; padding: 7px 9px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.queue-filters button { flex: none; background: transparent; border: 1px solid transparent; color: var(--muted); padding: 5px 7px; border-radius: 6px; font: inherit; font-size: 11px; cursor: pointer; }
+.queue-filters button.active { color: var(--text); border-color: var(--line-2); background: var(--bg2); }
+.export-check { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--warn); font-size: 12px; }
+.queue-count { color: var(--muted); font-size: 11px; }
+.mobile-panels { display: none; }
 .queue-item {
   display: grid; grid-template-columns: 108px 108px 1fr 58px;
   gap: 10px; align-items: center;
   padding: 8px 14px; cursor: pointer;
   border-left: 2px solid transparent;
   font-size: 12.5px;
-  border-radius: 8px; margin: 1px 6px;
+  border-radius: 8px; margin: 0 6px; height: 44px; box-sizing: border-box;
 }
 .queue-item:hover { background: var(--bg2); }
 .queue-item.current { background: color-mix(in srgb, var(--accent) 9%, transparent); border-left-color: var(--accent); }
+.queue-item.needs-review .q-status { color: var(--warn); }
 .queue-item .q-time { font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
 .queue-item .q-speaker { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .queue-item .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: -1px; }
 .queue-item .q-text { min-width: 0; }
 .queue-item .q-line { display: block; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .queue-item.current .q-line { color: var(--text); }
-.queue-item .q-line.translation { color: var(--muted); font-size: 11.5px; font-style: italic; }
 .queue-item .q-status { font-size: 10.5px; color: var(--muted); text-align: right; }
 .queue-empty { padding: 22px; text-align: center; color: var(--muted); font-size: 12.5px; }
 
@@ -616,9 +531,9 @@ body.desktop-shell .win-controls { display: flex; }
 .dot { width: 8px; height: 8px; border-radius: 50%; }
 .dot.total { background: var(--accent-2); }
 .dot.assigned { background: var(--good); }
+.dot.manual { background: var(--warn); }
 .dot.pending { background: transparent; border: 1px dashed var(--pending); }
 .dot.roles { background: var(--accent); }
-.dot.progress { background: var(--warn); }
 #stat-message { text-align: right; }
 
 /* ------------------------------------------------ badges */
@@ -690,8 +605,8 @@ body.desktop-shell .win-controls { display: flex; }
   list-style: none; user-select: none;
 }
 .adv > summary::-webkit-details-marker { display: none; }
-.adv > summary::before { content: "▸  "; }
-.adv[open] > summary::before { content: "▾  "; }
+.adv > summary::before { content: "鈻? "; }
+.adv[open] > summary::before { content: "鈻? "; }
 .adv-body { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; }
 .path-input { display: flex; gap: 8px; align-items: center; }
 .path-input input { flex: 1; min-width: 0; }
@@ -707,7 +622,7 @@ body.desktop-shell .win-controls { display: flex; }
 .check.inline { display: inline-flex; padding: 0; border: none; background: none; white-space: nowrap; }
 .check input { accent-color: var(--accent); }
 
-/* range slider (macOS style) — the input keeps a tall hit box so the whole
+/* range slider (macOS style) 鈥?the input keeps a tall hit box so the whole
    track/thumb is clickable; only the runnable track is thin. */
 input[type="range"] {
   -webkit-appearance: none; appearance: none;
@@ -729,78 +644,6 @@ input[type="range"]::-moz-range-track {
 }
 input[type="range"]::-moz-range-thumb {
   width: 16px; height: 16px; border: 1px solid rgba(0,0,0,.15);
-  border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35);
-}
-:root[data-theme="light"] input[type="range"]::-webkit-slider-thumb { box-shadow: 0 1px 4px rgba(0,0,0,.25); }
-
-/* ------------------------------------------------ settings center
-   Apple System Settings grammar: a quiet sidebar with a soft grey selection
-   pill, content grouped by hairline separators rather than nested boxes. */
-
-.settings-body { display: flex; min-height: 460px; max-height: 68vh; }
-.set-nav {
-  width: 192px; flex: none;
-  border-right: 1px solid var(--line);
-  background: transparent;
-  padding: 14px 10px;
-  display: flex; flex-direction: column; gap: 2px;
-}
-.set-item {
-  text-align: left; padding: 8px 12px; border-radius: 8px;
-  background: transparent; border: none; color: var(--dim);
-  font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer;
-  transition: background .12s, color .12s;
-}
-.set-item:hover { background: var(--bg3); color: var(--text); }
-/* Selected item is a soft grey pill, not a saturated block. */
-.set-item.active { background: var(--bg3); color: var(--text); font-weight: 600; }
-
-.set-content { flex: 1; padding: 20px 26px 26px; overflow: auto; }
-.set-content.fade { animation: setContent .18s ease; }
-@keyframes setContent { from { opacity: .3; transform: translateY(5px); } }
-
-.set-group { margin-bottom: 26px; }
-.set-group-title {
-  font-size: 12px; font-weight: 600; color: var(--muted);
-  letter-spacing: .2px; margin: 0 2px 10px;
-}
-/* No nested container: rows sit directly on the surface, divided by hairlines. */
-.set-group-box {
-  background: transparent; border: none; border-radius: 0;
-  padding: 0;
-}
-.set-row {
-  display: flex; align-items: center; justify-content: space-between; gap: 20px;
-  padding: 14px 2px; border-bottom: 1px solid var(--line);
-}
-.set-row:last-child { border-bottom: none; }
-.set-label { min-width: 0; }
-.set-label b { display: block; font-size: 13px; font-weight: 500; }
-.set-label span { font-size: 11.5px; color: var(--muted); display: block; margin-top: 1px; }
-.set-control { flex: none; display: flex; align-items: center; }
-
-.segmented {
-  display: inline-flex; gap: 2px;
-  background: var(--bg3); border-radius: 9px; padding: 2px;
-}
-.segmented button {
-  border: none; background: transparent; color: var(--muted);
-  padding: 5px 13px; border-radius: 7px;
-  font-size: 12px; font-weight: 600; font-family: inherit; cursor: pointer;
-  transition: all .13s;
-}
-.segmented button:hover { color: var(--text); }
-.segmented button.active { background: var(--bg1); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,.22); }
-
-.accent-dots { display: inline-flex; gap: 9px; }
-.accent-dots button {
-  width: 22px; height: 22px; border-radius: 50%;
-  background: var(--c); border: 2px solid transparent; cursor: pointer;
-  transition: transform .12s, box-shadow .12s;
-}
-.accent-dots button:hover { transform: scale(1.12); }
-.accent-dots button.active {
-  box-shadow: 0 0 0 2px var(--bg1), 0 0 0 4px var(--c);
 }
 
 .range-inputs { display: flex; align-items: center; gap: 9px; }
@@ -841,6 +684,22 @@ input[type="range"]::-moz-range-thumb {
 .file-item a { color: var(--accent); text-decoration: none; font-weight: 600; font-size: 12.5px; }
 .file-item a:hover { text-decoration: underline; }
 .pill { font-size: 11px; color: var(--muted); }
+.import-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.import-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 1fr); gap: 10px; align-items: center; }
+.import-pair span { overflow-wrap: anywhere; }
+.import-pair select { width: 100%; min-width: 0; height: 34px; background: var(--bg2); color: var(--text); border: 1px solid var(--line-2); border-radius: 7px; padding: 0 8px; font: inherit; }
+.import-preview, .cluster-review {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px; border: 1px solid var(--line-2); border-radius: 8px;
+  background: var(--bg2);
+}
+.import-preview > span { color: var(--dim); font-size: 12px; }
+.cluster-sample { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.cluster-sample span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
+.cluster-choice {
+  width: 100%; height: 34px; background: var(--bg1); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: 7px; padding: 0 9px; font: inherit;
+}
 
 /* ------------------------------------------------ drop overlay */
 
@@ -863,23 +722,51 @@ input[type="range"]::-moz-range-thumb {
 
 /* ------------------------------------------------ responsive */
 
-@media (max-width: 1400px) {
-  .workspace { grid-template-columns: minmax(0, 1fr) 268px; }
+@media (max-width: 1500px) {
+  .workspace {
+    grid-template-columns: minmax(260px, var(--media-natural, 420px)) minmax(0, 1fr) 250px;
+  }
 }
 @media (max-width: 1240px) {
-  .workspace { grid-template-columns: minmax(0, 1fr) 236px; }
-  .cue-assign { width: 360px; }
+  .workspace {
+    grid-template-columns: minmax(0, 1fr) 280px;
+    grid-template-rows: minmax(240px, auto) minmax(260px, 1fr) minmax(220px, 1fr);
+    grid-template-areas: "media side" "track track" "queue queue";
+  }
+  .speaker-buttons { grid-template-columns: repeat(3, 1fr); }
 }
-@media (max-width: 1180px) {
+@media (max-width: 800px) {
   .workspace {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto auto auto minmax(240px, 1fr);
-    grid-template-areas: "media" "side" "track" "cue" "queue";
+    grid-template-rows: auto minmax(260px, auto) auto minmax(240px, 1fr);
+    grid-template-areas: "media" "track" "mobile" "queue";
     overflow: auto;
   }
+  .mobile-panels { grid-area: mobile; display: flex; gap: 4px; align-self: end; }
+  .mobile-panels button { background: var(--bg2); border: 1px solid var(--line); color: var(--muted); border-radius: 6px; padding: 7px 12px; font: inherit; font-size: 12px; }
+  .mobile-panels button.active { color: var(--text); border-color: var(--accent); }
+  .workspace .side-panel { display: none; grid-area: queue; }
+  .workspace[data-mobile-panel="side"] .side-panel { display: flex; }
+  .workspace[data-mobile-panel="side"] .queue-panel { display: none; }
   .media-host video { max-height: 40vh; }
   .cue-bar { flex-direction: column; }
   .cue-assign { width: auto; border-left: none; padding-left: 0; border-top: 1px solid var(--line); padding-top: 12px; }
+}
+@media (max-width: 600px) {
+  .import-pair { grid-template-columns: 1fr; }
+  .toolbar { height: auto; min-height: 52px; flex-wrap: wrap; gap: 6px; padding: 8px; }
+  .brand { margin-right: auto; }
+  .toolbar-group + .toolbar-group { margin-left: 0; padding-left: 0; border-left: 0; }
+  .toolbar .spacer { display: none; }
+  .toolbar .select-wrap select { max-width: min(58vw, 240px); }
+  #detect-status { width: 100%; }
+  .panel-head { padding: 0 9px; }
+  .queue-item { grid-template-columns: 76px minmax(0, 1fr) 52px; gap: 5px; padding: 6px 8px; }
+  .queue-item .q-speaker { display: none; }
+  .queue-item .q-time { font-size: 9px; }
+  .cue-head, .assign-head { flex-wrap: wrap; }
+  .statusbar { gap: 8px; padding: 0 8px; }
+  #stat-message { display: none; }
 }
 
 /* ------------------------------------------------ device indicator */
@@ -905,165 +792,6 @@ input[type="range"]::-moz-range-thumb {
 #ruler { cursor: ew-resize; }
 #ruler:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 
-/* ============================================================
-   纯白主题细节覆盖（Apple 系统风）
-   白底必须靠发丝线与极淡投影分层，不能用底色深浅
-   ============================================================ */
-
-/* --- 媒体框：嵌入式监视器，而不是挖黑的洞 --- */
-:root[data-theme="light"] .media-host {
-  background: #ffffff;
-  padding: 10px;
-}
-:root[data-theme="light"] .media-host video {
-  border-radius: 10px;
-  box-shadow: 0 1px 2px rgba(0,0,0,.10), 0 6px 20px rgba(0,0,0,.10);
-  outline: 1px solid rgba(0,0,0,.06);
-  outline-offset: -1px;
-}
-
-/* --- 面板：纯白 + 发丝线 + 极淡投影（A2） --- */
-:root[data-theme="light"] .panel {
-  border-color: var(--line);
-  box-shadow: 0 1px 1.5px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.05);
-}
-/* 面板头不再用灰底区分，只留标题色条与底部发丝线 */
-:root[data-theme="light"] .panel-head {
-  background: #ffffff;
-  border-bottom-color: var(--line);
-}
-
-/* --- 按钮：白底上靠底衬与发丝线，不靠边框厚度 --- */
-:root[data-theme="light"] .btn {
-  background: #ffffff;
-  border-color: var(--line-2);
-}
-:root[data-theme="light"] .btn:hover { background: var(--bg2); border-color: #d5d5da; }
-/* Primary must come after the white base and re-assert the gradient, otherwise
-   the white background wins and the button looks disabled. */
-:root[data-theme="light"] .btn.primary {
-  background: var(--grad);
-  border-color: transparent;
-  color: #ffffff;
-  /* 去掉彩色光晕：白底上光晕会发脏 */
-  box-shadow: 0 1px 2px rgba(107,92,231,.22);
-}
-:root[data-theme="light"] .btn.primary:hover { background: var(--grad); filter: brightness(1.06); }
-:root[data-theme="light"] .btn.ghost { background: transparent; border-color: transparent; }
-:root[data-theme="light"] .btn.ghost:hover { background: var(--bg3); }
-:root[data-theme="light"] .btn.ghost.active {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
-}
-
-/* --- 工具栏：更透的毛玻璃 --- */
-:root[data-theme="light"] .toolbar {
-  background: var(--toolbar-bg);
-  border-bottom-color: var(--line);
-}
-
-/* --- 输入类控件：微凹面 --- */
-:root[data-theme="light"] .search,
-:root[data-theme="light"] .select-wrap select,
-:root[data-theme="light"] .field input,
-:root[data-theme="light"] .field select {
-  background: var(--bg2);
-  border-color: var(--line-2);
-}
-:root[data-theme="light"] .search:focus { background: #ffffff; }
-
-/* --- 轨道块：白底对比度必须加强 --- */
-:root[data-theme="light"] .track-block {
-  background: color-mix(in srgb, var(--pending) 16%, transparent);
-  border-color: rgba(0,0,0,.10);
-}
-:root[data-theme="light"] .track-block:hover {
-  background: color-mix(in srgb, var(--pending) 24%, transparent);
-}
-:root[data-theme="light"] .track-block.pending {
-  border-color: #c8c8cc;
-  background: #fbfbfc;
-}
-:root[data-theme="light"] .track-block.current {
-  background: #ffffff;
-  box-shadow: 0 0 0 2px var(--cur-color, var(--accent)), 0 6px 18px rgba(0,0,0,.16);
-}
-/* 泳道底：白底上需要可见的浅槽 */
-:root[data-theme="light"] .lane { background: #f7f7f8; }
-:root[data-theme="light"] .lane-label {
-  background: linear-gradient(90deg, #ffffff 62%, transparent);
-  color: var(--dim);
-}
-
-/* --- 标尺与波形：白底上降低饱和度 --- */
-:root[data-theme="light"] #ruler:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
-:root[data-theme="light"] .waveform { opacity: .75; }
-
-/* --- 清单：当前行用浅色衬底而非半透明紫 --- */
-:root[data-theme="light"] .queue-item:hover { background: var(--bg2); }
-:root[data-theme="light"] .queue-item.current {
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
-  border-left-color: var(--accent);
-}
-
-/* --- 状态栏：轻微下沉，与内容区分隔 --- */
-:root[data-theme="light"] .statusbar {
-  background: var(--bg2);
-  border-top-color: var(--line);
-}
-
-/* --- 分段控件与筛选胶囊 --- */
-:root[data-theme="light"] .filters,
-:root[data-theme="light"] .segmented,
-:root[data-theme="light"] .lang-seg { background: var(--bg3); }
-:root[data-theme="light"] .chip.active,
-:root[data-theme="light"] .segmented button.active,
-:root[data-theme="light"] .lang-seg button.active {
-  background: #ffffff;
-  box-shadow: 0 1px 3px rgba(0,0,0,.10);
-}
-
-/* --- 说话人按钮：白底上用淡色底衬 + 主色边 --- */
-:root[data-theme="light"] .speaker-btn { background: #ffffff; }
-/* Active must re-assert the role colour with enough specificity: without this
-   the white base background wins and the label disappears. */
-:root[data-theme="light"] .speaker-btn.active {
-  /* Deeper fill (--role-color-ink) keeps white text legible where the raw
-     palette colour would only reach ~2.8:1. */
-  background: var(--role-color-ink, var(--role-color, var(--accent)));
-  color: #ffffff;
-  box-shadow: 0 2px 8px color-mix(in srgb, var(--role-color, transparent) 38%, transparent);
-}
-:root[data-theme="light"] .speaker-btn.active .key {
-  color: rgba(255,255,255,.9);
-  border-color: rgba(255,255,255,.45);
-}
-
-/* --- 徽章 --- */
-:root[data-theme="light"] .badge { background: var(--bg3); border-color: var(--line-2); }
-
-/* --- 弹窗：纯白、投影承担分层 --- */
-:root[data-theme="light"] .modal {
-  border-color: var(--line);
-  box-shadow: var(--shadow-pop);
-}
-:root[data-theme="light"] .modal h2 { background: #ffffff; border-bottom-color: var(--line); }
-:root[data-theme="light"] .modal-foot { background: var(--bg2); border-top-color: var(--line); }
-:root[data-theme="light"] .modal-backdrop { background: rgba(0,0,0,.28); }
-
-/* --- 纯白主题：图标按钮需要更实的轮廓，否则在白底上"消失" --- */
-:root[data-theme="light"] .btn.icon {
-  background: #ffffff;
-  border-color: var(--line-2);
-  color: var(--dim);
-}
-:root[data-theme="light"] .btn.icon:hover {
-  background: var(--bg3);
-  border-color: #d0d0d6;
-  color: var(--text);
-}
-:root[data-theme="light"] .btn.icon svg { opacity: 1; }
-
 /* ------------------------------------------------ media / track divider */
 
 .media-resizer {
@@ -1081,10 +809,10 @@ input[type="range"]::-moz-range-thumb {
 body.resizing-media { cursor: row-resize; user-select: none; }
 
 /* ============================================================
-   三列顶栏布局 + 视频内嵌字幕
+   涓夊垪椤舵爮甯冨眬 + 瑙嗛鍐呭祵瀛楀箷
    ============================================================ */
 
-/* --- 视频内嵌字幕：挂在画面上，跟随字幕设置 ---
+/* --- 瑙嗛鍐呭祵瀛楀箷锛氭寕鍦ㄧ敾闈笂锛岃窡闅忓瓧骞曡缃?---
    The overlay is a sibling of .media-host, not a child: mountMedia() replaces
    the host's innerHTML when switching projects and would delete it. */
 .media-stage { position: relative; flex: 1; min-height: 0; display: flex; }
@@ -1106,17 +834,15 @@ body.resizing-media { cursor: row-resize; user-select: none; }
   -webkit-text-stroke: .2px rgba(0,0,0,.5);
 }
 .overlay-text { font-size: 21px; font-weight: 600; }
-.overlay-translation { font-size: 15px; color: rgba(255,255,255,.88); font-weight: 400; }
-.overlay-text:empty, .overlay-translation:empty { display: none; }
-/* 纯白主题：字幕底衬保持一致的黑，画面内容不随主题变 */
-:root[data-theme="light"] .overlay-text,
-:root[data-theme="light"] .overlay-translation { background: rgba(0,0,0,.68); }
+.overlay-text:empty { display: none; }
 
-/* --- 媒体列：按画面比例锁宽，避免又是横向留黑 --- */
+
+/* --- 濯掍綋鍒楋細鍒楀宸查攣鍒扮敾闈㈡瘮渚嬶紝濯掍綋鐩掓拺婊″嵆鍙?--- */
 .media-panel { min-width: 0; }
 .media-host { min-height: 0; }
+.media-stage { width: 100%; }
 
-/* --- 角色列表：紧凑单行，5 个角色不再需要滚动 --- */
+/* --- 瑙掕壊鍒楄〃锛氱揣鍑戝崟琛岋紝5 涓鑹蹭笉鍐嶉渶瑕佹粴鍔?--- */
 .role-summary { gap: 2px; }
 .side-body { gap: 10px; }
 .side-group.detect-group .note-list { max-height: 76px; }
@@ -1138,19 +864,14 @@ body.resizing-media { cursor: row-resize; user-select: none; }
   padding: 3px 0; list-style: none;
 }
 .detect-notes summary::-webkit-details-marker { display: none; }
-.detect-notes summary::before { content: "▸ "; }
-.detect-notes[open] summary::before { content: "▾ "; }
+.detect-notes summary::before { content: "鈻?"; }
+.detect-notes[open] summary::before { content: "鈻?"; }
 .detect-notes .note-list { max-height: 96px; overflow: auto; margin-top: 4px; }
 
-/* --- 当前字幕列：人物按钮两列网格，消除横向滚动 --- */
-.cue-panel .cue-bar { flex-direction: column; gap: 10px; padding: 11px 14px; }
-.cue-panel .cue-assign {
-  width: auto; border-left: none; padding-left: 0;
-  border-top: 1px solid var(--line); padding-top: 10px;
-}
+/* --- 褰撳墠瀛楀箷鏉★細浜虹墿鎸夐挳缃戞牸锛屾秷闄ゆí鍚戞粴鍔?--- */
 .speaker-buttons {
-  /* Wide enough for a 5-glyph name plus swatch and hotkey, so labels never wrap. */
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  /* Compact grid: a short name plus swatch and hotkey still fits. */
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
   gap: 6px; overflow: visible;
 }
 .speaker-btns-scroll { display: contents; }
@@ -1160,7 +881,6 @@ body.resizing-media { cursor: row-resize; user-select: none; }
   padding: 0 9px; gap: 6px; font-size: 12px;
 }
 .speaker-btn .key { margin-left: auto; }
-.cue-panel .current-text { font-size: 17px; line-height: 1.4; }
 
 /* --- The timeline content is inset by a gutter; speaker labels sit in that
    gutter (negative offset) so they can never be painted over the first cues. --- */
@@ -1179,18 +899,151 @@ body.resizing-media { cursor: row-resize; user-select: none; }
 .lane { overflow: visible; }
 .track-lanes { overflow: visible; }
 
-/* --- 清单：行高收紧，同高度多显示两行 --- */
+/* --- 娓呭崟锛氳楂樻敹绱э紝鍚岄珮搴﹀鏄剧ず涓よ --- */
 .queue-item { padding: 5px 14px; }
-
-/* --- 窄窗口回退为单列纵向堆叠 --- */
-@media (max-width: 1240px) {
-  .workspace {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto auto auto auto minmax(140px, 1fr);
-    grid-template-areas: "media" "cue" "side" "track" "queue";
-  }
-  .speaker-buttons { grid-template-columns: repeat(3, 1fr); }
-}
 
 /* Tools that operate on the current cue / selection live with the assignment
    controls, not in the speaker library column. */
+
+/* ============================================================
+   Refined workspace skin
+   ============================================================ */
+
+html, body { background: var(--bg0); }
+body { letter-spacing: .01em; }
+
+.toolbar {
+  height: 58px;
+  padding: 0 20px;
+  gap: 14px;
+  background: var(--toolbar-bg);
+  border-bottom-color: #263136;
+  box-shadow: 0 8px 22px rgba(0,0,0,.12);
+}
+.brand { gap: 11px; margin-right: 10px; }
+.brand-mark {
+  width: 29px; height: 29px; padding: 7px 6px;
+  border-radius: 8px;
+  background: var(--accent);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.brand-text { font-size: 16px; letter-spacing: .15px; }
+.toolbar-group { gap: 8px; }
+.toolbar-group + .toolbar-group { margin-left: 4px; padding-left: 16px; border-left-color: #2a363a; }
+.select-wrap select {
+  height: 36px; max-width: 260px;
+  background-color: #192226;
+  border-color: #35434a;
+  border-radius: 9px;
+  padding-left: 12px;
+}
+.select-wrap select:hover { background-color: var(--bg3); border-color: #4a5b61; }
+
+.btn {
+  height: 34px; padding: 0 13px;
+  background: #1b2529;
+  border-color: #334148;
+  border-radius: 9px;
+  box-shadow: 0 1px 1px rgba(0,0,0,.14);
+}
+.btn:hover { background: #27343a; border-color: #4a5a61; }
+.btn.primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: #0d1c19;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.btn.primary:hover { background: #7bd6bc; filter: none; }
+.btn.ghost:hover { background: #233036; }
+.btn.icon { width: 34px; }
+.btn.icon.sm { width: 28px; height: 28px; }
+.btn.sm { height: 29px; border-radius: 8px; }
+
+#stage { background: #101719; }
+.workspace { gap: 12px; padding: 12px; }
+.panel {
+  background: var(--bg1);
+  border-color: #2a373c;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+}
+.panel-head {
+  height: 46px;
+  padding: 0 15px;
+  background: rgba(24,33,36,.72);
+  border-bottom-color: #29363b;
+}
+.panel-title { font-size: 13px; letter-spacing: .2px; }
+.kicker { width: 7px; height: 7px; border-radius: 50%; }
+.head-hint { color: #71807e; }
+.timecode { color: #aebcb9; }
+
+.media-host { background: #080c0d; }
+.empty-import { gap: 10px; }
+.empty-import .empty-title { color: #dce8e4; font-size: 15px; }
+.empty-import .btn { background: rgba(36,51,55,.82); }
+
+.track-outer { background: #131b1e; padding-top: 8px; }
+.track-main {
+  height: 88px;
+  border-radius: 9px;
+  background: #182125;
+  box-shadow: inset 0 0 0 1px #2a373b;
+}
+.track-block { border-radius: 7px; border-color: rgba(215,236,231,.14); }
+.track-block.current { box-shadow: 0 0 0 2px var(--cur-color, var(--accent)), 0 7px 18px rgba(0,0,0,.3); }
+.playhead { background: var(--accent); box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 64%, transparent); }
+.playhead::before { border-top-color: var(--accent); }
+.track-meta { padding: 8px 15px 11px; }
+
+.side-body { padding: 11px 12px; gap: 13px; }
+.side-group-title, .assign-label { letter-spacing: 1.05px; color: #768581; }
+.role-chip { padding: 5px 7px; border-radius: 7px; }
+.role-chip:hover { background: #202c30; }
+.role-chip .swatch { width: 9px; height: 9px; }
+.detect-summary .notes { background: #1a2428; border-color: #2b393e; }
+
+.cue-bar {
+  gap: 20px;
+  padding: 12px 15px 13px;
+  background: #182225;
+  border-top-color: #2a383d;
+}
+.current-range { color: var(--accent); }
+.current-text { font-size: 18px; line-height: 1.4; }
+.cue-assign { padding-left: 20px; border-left-color: #314047; }
+.speaker-buttons { gap: 7px; }
+.speaker-btn { height: 34px; border-radius: 8px; background: #1c282c; border-color: #334249; }
+.speaker-btn:hover { background: #26363b; }
+.speaker-btn.active { color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.22); box-shadow: 0 4px 14px color-mix(in srgb, var(--role-color, var(--accent)) 24%, transparent); }
+.speaker-btn.active .key { color: rgba(255,255,255,.88); border-color: rgba(255,255,255,.36); }
+
+.queue-filters { padding: 8px 11px; gap: 4px; background: #172124; border-bottom-color: #2a383d; }
+.queue-filters button { padding: 5px 9px; border-radius: 7px; color: #81908d; }
+.queue-filters button:hover { color: var(--dim); background: #202d31; }
+.queue-filters button.active { color: #dfeae7; border-color: #3e555a; background: #253339; }
+.queue-item { height: 46px; margin: 0 7px; padding: 5px 12px; border-bottom: 1px solid rgba(55,70,75,.42); border-radius: 7px; }
+.queue-item:hover { background: #202c30; }
+.queue-item.current { background: color-mix(in srgb, var(--accent) 10%, transparent); border-left-color: var(--accent); }
+.queue-item .q-line { color: #aebcb9; }
+.queue-item.current .q-line { color: #e5efec; }
+
+.statusbar { height: 38px; padding: 0 20px; gap: 18px; background: #121a1c; border-top-color: #28353a; }
+.stat { color: #aebbb8; }
+.stat b { color: #eef5f3; }
+
+.modal { border-color: #314047; border-radius: 13px; }
+.modal h2 { padding: 16px 21px; background: #182225; border-bottom-color: #2b393e; }
+.modal-body { padding: 20px 21px; }
+.modal-foot { padding: 13px 21px; background: #1a2528; border-top-color: #2b393e; }
+.field input[type="text"], .field input[type="number"], .field input[type="password"], .field select { background: #1b272b; border-color: #3a484e; border-radius: 8px; }
+.check, .file-item, .import-preview, .cluster-review { background: #1b272b; border-color: #303f45; }
+
+#drop-overlay { background: color-mix(in srgb, var(--accent) 11%, rgba(7,13,14,.78)); }
+
+@media (max-width: 800px) {
+  .toolbar { padding: 8px 10px; }
+  .workspace { gap: 10px; padding: 10px; }
+  .cue-bar { padding: 11px 12px; }
+  .cue-assign { padding-left: 0; }
+}

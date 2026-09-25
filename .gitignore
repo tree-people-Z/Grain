@@ -6,21 +6,16 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# --- 运行时数据：项目、导出、work、设置、HF token（含隐私，勿提交）---
+# --- 运行时数据：项目、导出、work、上传暂存（含隐私，勿提交）---
 data/*
 !data/.gitkeep
 
-# --- 外挂引擎的隔离环境（由 scripts/setup_engine.py 创建，体积大，勿提交）---
-engines/*/.venv/
+# --- 虚拟环境 ---
 .venv/
 venv/
 env/
 
-# --- 打包产物 ---
-build/
-dist/
-
-# --- 内置资源（整合包）：ffmpeg 与模型，体积大，勿提交 ---
+# --- 内置资源：ffmpeg 与 pyannote 模型，体积大，勿提交 ---
 runtime/
 models/
 
@@ -28,10 +23,14 @@ models/
 *.log
 *.tmp
 
+# --- 开发调试临时产物 ---
+.chrome-test/
+smoke.py
+ui-check.png
+
 # --- 操作系统 / 编辑器 / 工具 ---
 .DS_Store
 Thumbs.db
 desktop.ini
-.zcodeignore
 .vscode/
 .idea/

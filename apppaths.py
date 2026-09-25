@@ -1,109 +1,61 @@
 """Where the app reads bundled resources and writes user data.
 
-Running from source, both live in the repository root. A PyInstaller build is
-different: read-only resources (``static/``) are unpacked into ``sys._MEIPASS``,
-while ``data/`` and any locally installed ``engines/`` must sit next to the exe
-so they survive and stay writable.
+Everything lives in the repository root: ``static/`` is read from here and the
+runtime ``data/`` directory is created next to it. ``SSP_DATA_DIR`` overrides
+the data location (used by tests so they never touch real user data).
 """
 
 from __future__ import annotations
 
 import os
-import sys
 
-
-def bundle_dir() -> str:
-    """Read-only resources shipped with the app (``static/``)."""
-    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def writable_dir() -> str:
-    """Writable home: the exe's folder when frozen, else the repo root."""
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
+    """Writable home: the repository root."""
+    return BASE_DIR
 
 
 def data_dir() -> str:
     """The runtime ``data/`` directory, honouring the ``SSP_DATA_DIR`` override."""
-    return os.environ.get("SSP_DATA_DIR") or os.path.join(writable_dir(), "data")
+    return os.environ.get("SSP_DATA_DIR") or os.path.join(BASE_DIR, "data")
 
 
-# --- bundled resources (the "整合包" layout) ---------------------------------
+# --- bundled resources -------------------------------------------------------
 #
-# A portable package ships its heavy assets next to the exe (or, for a onefile
-# build, inside ``_internal``). Both are searched, writable_dir() first so a
-# package can update its own copy:
+# A portable package ships its heavy assets next to the code:
 #
 #     <root>/runtime/ffmpeg/bin/ffmpeg.exe|ffprobe.exe
 #     <root>/models/hf/hub/models--...            (HuggingFace hub cache)
-#     <root>/models/modelscope/models/...         (ModelScope cache)
-#     <root>/engines/<key>/                        (isolated external engines)
-
-def _first_dir(candidates) -> str | None:
-    for candidate in candidates:
-        if candidate and os.path.isdir(candidate):
-            return candidate
-    return None
-
 
 def bundled_ffmpeg_dir() -> str | None:
     """Folder holding a bundled ``ffmpeg``/``ffprobe``, or None."""
-    return _first_dir([
-        os.path.join(writable_dir(), "runtime", "ffmpeg", "bin"),
-        os.path.join(bundle_dir(), "runtime", "ffmpeg", "bin"),
-    ])
+    directory = os.path.join(writable_dir(), "runtime", "ffmpeg", "bin")
+    return directory if os.path.isdir(directory) else None
 
 
 def bundled_hf_hub_cache() -> str | None:
     """Bundled HuggingFace ``hub`` cache directory, or None."""
-    return _first_dir([
-        os.path.join(writable_dir(), "models", "hf", "hub"),
-        os.path.join(bundle_dir(), "models", "hf", "hub"),
-    ])
-
-
-def bundled_modelscope_cache() -> str | None:
-    """Bundled ModelScope cache root (its ``models/`` lives inside), or None."""
-    return _first_dir([
-        os.path.join(writable_dir(), "models", "modelscope"),
-        os.path.join(bundle_dir(), "models", "modelscope"),
-    ])
-
-
-def hf_token_configured() -> bool:
-    """True when an HF token is available (env var or ``data/hf_token.txt``)."""
-    if os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN"):
-        return True
-    token_file = os.path.join(data_dir(), "hf_token.txt")
-    try:
-        with open(token_file, "r", encoding="utf-8-sig") as handle:
-            return bool(handle.read().strip())
-    except OSError:
-        return False
+    directory = os.path.join(writable_dir(), "models", "hf", "hub")
+    return directory if os.path.isdir(directory) else None
 
 
 def configure_model_caches() -> None:
-    """Point HF / ModelScope at the bundled caches so engines load offline.
+    """Point HuggingFace at the bundled cache so pyannote loads offline.
 
-    Only sets a variable when the user has not already overridden it and the
-    bundled directory actually exists, so a normal source checkout (no bundled
-    models) keeps using the default per-user cache untouched.
-
-    When the bundled weights are present and no token is configured, HF is put
-    in offline mode: the gated pyannote models then load straight from the
-    bundled cache without ever contacting the Hub (and therefore without a
-    token or accepting the gate). A configured token leaves it online so new
-    models can still be fetched.
+    Only sets the variable when the bundled directory exists and the user has
+    not already overridden it, so a source checkout without bundled models keeps
+    using the default per-user cache. When weights are bundled and no token is
+    configured, HF is forced offline: the gated community-1 weights then load
+    straight from the local cache with no token and no network access.
     """
     hf_hub = bundled_hf_hub_cache()
     if hf_hub and not (os.environ.get("HF_HUB_CACHE")
                        or os.environ.get("HUGGINGFACE_HUB_CACHE")):
         os.environ["HF_HUB_CACHE"] = hf_hub
         os.environ.setdefault("HF_HOME", os.path.dirname(hf_hub))
-    ms = bundled_modelscope_cache()
-    if ms and not os.environ.get("MODELSCOPE_CACHE"):
-        os.environ["MODELSCOPE_CACHE"] = ms
-    if hf_hub and not hf_token_configured():
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+    if hf_hub and not token:
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")

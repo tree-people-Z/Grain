@@ -1,4 +1,4 @@
-"""Subtitle parsing and writing for SRT / WebVTT / ASS.
+"""Subtitle parsing and writing for SRT / ASS.
 
 Stdlib only. The internal representation is a list of segment dicts:
 
@@ -11,7 +11,6 @@ corrected by a human) or "pending" (not assigned yet).
 
 from __future__ import annotations
 
-import bisect
 import re
 
 # --- timecode helpers -------------------------------------------------------
@@ -22,7 +21,7 @@ _TS = re.compile(
 
 
 def parse_timestamp(value: str) -> float:
-    """Parse ``00:01:02,500`` (SRT), ``00:01:02.500`` (VTT) or ``0:01:02.50``."""
+    """Parse ``00:01:02,500`` (SRT) or ``0:01:02.50`` (ASS)."""
     match = _TS.search(value.strip())
     if not match:
         raise ValueError(f"unrecognised timestamp: {value!r}")
@@ -34,7 +33,7 @@ def parse_timestamp(value: str) -> float:
 
 
 def format_timestamp(seconds: float, sep: str = ",") -> str:
-    """Format seconds as ``HH:MM:SS,mmm``; ``sep`` selects ``.`` for VTT."""
+    """Format seconds as ``HH:MM:SS,mmm`` (``sep`` selects ``.`` when needed)."""
     if seconds < 0:
         seconds = 0.0
     total_ms = int(round(seconds * 1000))
@@ -70,7 +69,6 @@ def _new_segment(start: float, end: float, text: str) -> dict:
         "start": round(start, 3),
         "end": round(end, 3),
         "text": text.strip(),
-        "translation": "",
         "speaker_id": None,
         "confidence": None,
         "status": "pending",
@@ -83,250 +81,6 @@ def _reindex(segments: list[dict]) -> list[dict]:
     return segments
 
 
-# --- line handling: bilingual subtitles vs hard-wrapped text ----------------
-
-def _script_class(text: str) -> str:
-    """Rough script class of one line: ja / ko / zh / latin / other.
-
-    Kana marks Japanese even when the line is kanji-heavy; hangul marks Korean.
-    """
-    kana = sum(1 for char in text if "\u3040" <= char <= "\u30ff")
-    if kana > 0:
-        return "ja"
-    hangul = sum(1 for char in text if "\uac00" <= char <= "\ud7af")
-    if hangul > 0:
-        return "ko"
-    cjk = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
-    latin = sum(1 for char in text if char.isascii() and char.isalpha())
-    if cjk == 0 and latin == 0:
-        return "other"
-    return "zh" if cjk >= latin else "latin"
-
-
-def split_lines(text: str) -> list[str]:
-    return [line.strip() for line in (text or "").split("\n") if line.strip()]
-
-
-def detect_line_mode(segments: list[dict]) -> dict:
-    """Guess whether multi-line cues are bilingual subtitles or wrapped text.
-
-    Bilingual cues pair two different scripts (e.g. 中文 + English); hard-wrapped
-    cues repeat the same script. The distinction decides whether line 2 is a
-    translation or a continuation of the sentence.
-    """
-    multiline = 0
-    different_script = 0
-    for segment in segments:
-        lines = split_lines(segment.get("text", ""))
-        if len(lines) < 2:
-            continue
-        multiline += 1
-        classes = {_script_class(line) for line in lines[:2]}
-        if len(classes) == 2 and "other" not in classes:
-            different_script += 1
-    total = len(segments) or 1
-    ratio = multiline / total
-    bilingual = multiline >= 2 and different_script / max(1, multiline) >= 0.6
-    suggested = "bilingual" if bilingual else ("join" if ratio >= 0.3 else "keep")
-    if not bilingual and _detect_interleaved(segments):
-        suggested = "interleaved"
-    return {
-        "suggested": suggested,
-        "mode": suggested,
-        "multiline": multiline,
-        "different_script": different_script,
-        "multiline_ratio": round(ratio, 3),
-    }
-
-
-def _cue_classes(segments: list[dict]) -> list[str]:
-    return [
-        _script_class(split_lines(s.get("text", ""))[0]) if split_lines(s.get("text", "")) else "other"
-        for s in segments
-    ]
-
-
-def _detect_interleaved(segments: list[dict]) -> bool:
-    """True when two languages alternate cue-by-cue on one timeline (e.g. a
-    JPSC ASS where 日文 and 简体中文 cues share identical timings)."""
-    if len(segments) < 6:
-        return False
-    classes = _cue_classes(segments)
-    counts: dict[str, int] = {}
-    for c in classes:
-        counts[c] = counts.get(c, 0) + 1
-    top = sorted(counts.items(), key=lambda kv: -kv[1])[:2]
-    if len(top) < 2:
-        return False
-    total = len(classes)
-    (c1, n1), (c2, n2) = top
-    if "other" in (c1, c2):
-        return False
-    if n1 / total < 0.2 or n2 / total < 0.2:
-        return False
-    if (n1 + n2) / total < 0.8:
-        return False
-    switches = sum(1 for i in range(1, total)
-                   if classes[i] != classes[i - 1] and classes[i] in (c1, c2) and classes[i - 1] in (c1, c2))
-    return switches / (total - 1) >= 0.3
-
-
-def apply_interleaved(segments: list[dict]) -> tuple[list[dict], dict]:
-    """Fold alternating-language cues into one bilingual track.
-
-    The majority script class becomes the primary text; each cue of the other
-    language is folded (by maximum time overlap) into the primary cue it
-    belongs to, and the folded cue is dropped. Cues with no partner stay.
-    """
-    classes = _cue_classes(segments)
-    counts: dict[str, int] = {}
-    for c in classes:
-        counts[c] = counts.get(c, 0) + 1
-    # Primary language preference: 中文 > latin > other > ja (UI 语言优先)。
-    order = ["zh", "latin", "ko", "other", "ja"]
-    primary = next((c for c in order if counts.get(c)), None)
-    if primary is None:
-        return segments, {"applied": "interleaved", "folded": 0, "primary": None}
-    foreign = max((c for c in counts if c != primary), key=lambda c: counts[c], default=None)
-    if foreign is None:
-        return segments, {"applied": "interleaved", "folded": 0, "primary": primary}
-
-    prim_indices = sorted(
-        (i for i, c in enumerate(classes) if c != foreign),
-        key=lambda i: segments[i]["start"],
-    )
-    prim_starts = [segments[i]["start"] for i in prim_indices]
-
-    import bisect
-
-    # Pairing is not one-to-one: one Japanese line is often split across two
-    # Chinese cues (and vice versa), so a foreign cue may attach its text to
-    # several heavily-overlapping primary cues.
-    folded = 0
-    remove = set()
-    for i, segment in enumerate(segments):
-        if classes[i] != foreign:
-            continue
-        duration = max(0.01, segment["end"] - segment["start"])
-        pos = bisect.bisect_left(prim_starts, segment["start"])
-        partners = []
-        for j in range(max(0, pos - 6), min(len(prim_indices), pos + 6)):
-            k = prim_indices[j]
-            overlap = (min(segment["end"], segments[k]["end"])
-                       - max(segment["start"], segments[k]["start"]))
-            if overlap >= 0.25 * duration:
-                partners.append((overlap, k))
-        if not partners:
-            continue  # no believable partner: keep the cue as its own line
-        partners.sort(key=lambda kv: -kv[0])
-        strongest = partners[0][0]
-        for overlap, k in partners:
-            if overlap < 0.6 * strongest:
-                continue
-            target = segments[k]
-            existing = (target.get("translation") or "").strip()
-            if segment["text"] in existing:
-                continue
-            target["translation"] = (existing + "\n" + segment["text"]).strip()
-            # A human/previous assignment on the folded cue transfers over.
-            if target.get("speaker_id") is None and segment.get("speaker_id") is not None:
-                target["speaker_id"] = segment["speaker_id"]
-                target["status"] = segment.get("status", "pending")
-            folded += 1
-        remove.add(i)
-
-    kept = [s for i, s in enumerate(segments) if i not in remove]
-    _reindex(kept)
-    return kept, {"applied": "interleaved", "folded": folded,
-                  "primary": primary, "foreign": foreign,
-                  "kept": len(kept), "removed": len(remove)}
-
-
-def apply_line_mode(segments: list[dict], mode: str = "auto") -> tuple[list[dict], dict]:
-    """Normalise multi-line cue bodies. Returns (segments, info).
-
-    mode: auto | bilingual | join | keep
-      bilingual — line 1 becomes ``text``, the rest become ``translation``
-      join      — every line merges into one sentence (SRT hard-wrapping)
-      keep      — leave the raw multi-line text untouched
-    """
-    info = detect_line_mode(segments)
-    if mode == "auto":
-        mode = info["suggested"]
-    if mode == "keep":
-        info["applied"] = mode
-        return segments, info
-    if mode == "interleaved":
-        kept, applied = apply_interleaved(segments)
-        info["applied"] = "interleaved"
-        info.update(applied)
-        return kept, info
-    for segment in segments:
-        lines = split_lines(segment.get("text", ""))
-        if not lines:
-            continue
-        if mode == "bilingual":
-            segment["text"] = lines[0]
-            segment["translation"] = "\n".join(lines[1:])
-        else:  # join
-            separator = " " if any(_script_class(l) == "latin" for l in lines) else ""
-            segment["text"] = separator.join(lines)
-            segment["translation"] = ""
-    info["applied"] = mode
-    return segments, info
-
-
-def merge_translations(segments: list[dict], others: list[dict]) -> int:
-    """Attach ``others`` as translations of ``segments`` by maximum time overlap.
-
-    Used for the two-file workflow (e.g. ``video.zh.srt`` + ``video.en.srt``).
-    Returns the number of cues that received a translation.
-    """
-    if not others:
-        return 0
-    # Interval-indexed scan instead of the old O(n×m) double loop. Sort the
-    # translation track once, advance a pointer past cues that end before the
-    # segment, and binary-search the upper bound: everything outside [j, right)
-    # has zero overlap, so the best match is unchanged.
-    ordered = sorted(others, key=lambda other: other["start"])
-    starts = [other["start"] for other in ordered]
-    ends = [other["end"] for other in ordered]
-    total = len(ordered)
-    matched = 0
-    j = 0
-    for segment in sorted(segments, key=lambda item: item["start"]):
-        seg_start, seg_end = segment["start"], segment["end"]
-        while j < total and ends[j] <= seg_start:
-            j += 1
-        right = bisect.bisect_left(starts, seg_end)
-        best, best_overlap = None, 0.0
-        for k in range(j, right):
-            other = ordered[k]
-            overlap = min(seg_end, other["end"]) - max(seg_start, other["start"])
-            if overlap > best_overlap:
-                best_overlap, best = overlap, other
-        if best is not None and best_overlap > 0.05:
-            translation = (best.get("text") or "").strip()
-            if translation and translation != segment.get("text"):
-                segment["translation"] = translation
-                matched += 1
-    return matched
-
-
-def compose_text(segment: dict, field: str = "both") -> str:
-    """Assemble a cue body honouring bilingual content.
-
-    field: both | primary | translation
-    """
-    primary = segment.get("text", "")
-    translation = (segment.get("translation") or "").strip()
-    if not translation or field == "primary":
-        return primary
-    if field == "translation":
-        return translation
-    return f"{primary}\n{translation}" if primary else translation
-
-
 # --- parsing ----------------------------------------------------------------
 
 _SRT_BLOCK = re.compile(
@@ -335,29 +89,6 @@ _SRT_BLOCK = re.compile(
     r"(?P<text>(?:.|\n)*?)(?=\n\s*\n|\n\d+\s*\n|\Z)",
     re.MULTILINE,
 )
-
-_VTT_CUE = re.compile(
-    r"(?:(?P<idx>[\w.-]+)[^\n]*\n)?"
-    r"(?P<start>[^\n]+?)\s*-->\s*(?P<end>[^\n]+?)(?:[ \t]+[^\n]*)?\n"
-    r"(?P<text>(?:.|\n)*?)(?=\n\s*\n|\Z)",
-    re.MULTILINE,
-)
-
-_VOICE_TAG = re.compile(r"^<\s*v[\s.]([^>]+)>", re.IGNORECASE)
-_TAG = re.compile(r"<[^>]+>")
-
-
-def _strip_vtt_voice(text: str) -> tuple[str, str | None]:
-    """Return (clean_text, inline_speaker_name) for a VTT cue body."""
-    lines = []
-    inline_speaker = None
-    for raw in text.splitlines():
-        voice = _VOICE_TAG.match(raw.strip())
-        if voice:
-            inline_speaker = voice.group(1).strip()
-            raw = _VOICE_TAG.sub("", raw, count=1)
-        lines.append(_TAG.sub("", raw))
-    return "\n".join(lines).strip(), inline_speaker
 
 
 def parse_srt(content: str) -> tuple[list[dict], dict]:
@@ -368,29 +99,6 @@ def parse_srt(content: str) -> tuple[list[dict], dict]:
         end = parse_timestamp(match.group("end"))
         text = match.group("text").strip()
         segments.append(_new_segment(start, end, text))
-    return _reindex(segments), {}
-
-
-def parse_vtt(content: str) -> tuple[list[dict], dict]:
-    content = content.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
-    body = re.sub(r"^WEBVTT[^\n]*\n", "", content)
-    # Drop NOTE/STYLE/REGION blocks, which are not cues.
-    body = re.sub(r"^(?:NOTE|STYLE|REGION)\b.*?(?=\n\s*\n|\Z)", "", body,
-                  flags=re.MULTILINE | re.DOTALL)
-    segments = []
-    for match in _VTT_CUE.finditer(body):
-        text, inline_speaker = _strip_vtt_voice(match.group("text"))
-        if not text:
-            continue
-        segment = _new_segment(
-            parse_timestamp(match.group("start")),
-            parse_timestamp(match.group("end")),
-            text,
-        )
-        if inline_speaker:
-            # Preserve the name so review can pre-fill known roles.
-            segment["speaker_name_hint"] = inline_speaker
-        segments.append(segment)
     return _reindex(segments), {}
 
 
@@ -421,6 +129,18 @@ _ASS_LYRIC_STYLE = re.compile(
     r"(?:$|[_\s0-9-])",
     re.IGNORECASE,
 )
+
+# Common fansub style suffixes. A JP and CH event with the same time range is
+# one bilingual cue, not two separate lines to classify independently.
+_ASS_LANG = re.compile(r"(?:^|_)(JP|CH)(?:\d+)?(?:_|$)", re.IGNORECASE)
+
+
+def _bilingual_key(style: str) -> tuple[str, str] | None:
+    match = _ASS_LANG.search(style or "")
+    if not match:
+        return None
+    family = _ASS_LANG.sub("_LANG", style, count=1)
+    return family.lower(), match.group(1).upper()
 
 _ASS_DEFAULT_STYLE = {
     "Fontname": "Microsoft YaHei",
@@ -470,7 +190,7 @@ def parse_ass(content: str) -> tuple[list[dict], dict]:
         head, _, tail = line.partition(":")
         head_lower = head.strip().lower()
 
-        if section == "v4+ styles" or section == "v4 styles":
+        if section in ("v4+ styles", "v4 styles"):
             if head_lower == "format":
                 style_format = [f.strip() for f in tail.split(",")]
             elif head_lower == "style":
@@ -523,7 +243,35 @@ def parse_ass(content: str) -> tuple[list[dict], dict]:
         segment["_ass_style"] = style_name
         segments.append(segment)
 
-    segments.sort(key=lambda s: s["start"])
+    # Some ASS files duplicate every event and place Japanese/Chinese on
+    # separate style lines. Remove exact duplicates, then combine a matching
+    # JP/CH pair into one cue so speaker detection runs once per spoken line.
+    unique = []
+    seen = set()
+    for segment in segments:
+        key = (segment["start"], segment["end"], segment.get("_ass_style"),
+               segment["text"], segment.get("speaker_name_hint"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(segment)
+    segments = unique
+    bilingual: dict[tuple[float, float, str], dict[str, list[dict]]] = {}
+    for segment in segments:
+        lang_key = _bilingual_key(segment.get("_ass_style", ""))
+        if lang_key:
+            family, language = lang_key
+            bilingual.setdefault((segment["start"], segment["end"], family), {}) \
+                .setdefault(language, []).append(segment)
+    removed = set()
+    for (start, end, _family), languages in bilingual.items():
+        pairs = min(len(languages.get("JP", [])), len(languages.get("CH", [])))
+        for index in range(pairs):
+            jp, ch = languages["JP"][index], languages["CH"][index]
+            jp["text"] = f"{jp['text']}\n{ch['text']}"
+            removed.add(id(ch))
+    segments = [segment for segment in segments if id(segment) not in removed]
+    segments.sort(key=lambda s: (s["start"], s["end"]))
     return _reindex(segments), {
         "styles": styles,
         "style_format": style_format,
@@ -555,15 +303,11 @@ def parse_subtitle(path: str) -> tuple[list[dict], dict]:
     """Dispatch on file extension and return ``(segments, meta)``."""
     content = _read_text(path)
     suffix = path.lower().rsplit(".", 1)[-1] if "." in path else ""
-    if suffix == "srt":
-        return parse_srt(content)
-    if suffix in ("vtt", "webvtt"):
-        return parse_vtt(content)
     if suffix in ("ass", "ssa"):
         return parse_ass(content)
+    if suffix == "srt":
+        return parse_srt(content)
     # Unknown extension: sniff by content shape.
-    if content.lstrip().startswith("WEBVTT"):
-        return parse_vtt(content)
     if "[Events]" in content or "[Script Info]" in content:
         return parse_ass(content)
     return parse_srt(content)
@@ -571,22 +315,12 @@ def parse_subtitle(path: str) -> tuple[list[dict], dict]:
 
 # --- writing ----------------------------------------------------------------
 
-def _speaker_prefix(segment: dict, name: str | None) -> str:
+def _speaker_prefix(name: str | None) -> str:
     return f"[{name}] " if name else ""
 
 
-def _prefix_body(segment: dict, name: str | None, text_field: str) -> str:
-    """Compose the cue body and indent a translation line under the speaker tag."""
-    body = compose_text(segment, text_field)
-    prefix = _speaker_prefix(segment, name)
-    if not prefix:
-        return body
-    indent = " " * len(prefix)
-    return prefix + body.replace("\n", "\n" + indent)
-
-
-def write_srt(segments: list[dict], names: dict[int, str], include_pending: bool = True,
-              text_field: str = "both") -> str:
+def write_srt(segments: list[dict], names: dict[int, str],
+              include_pending: bool = True) -> str:
     lines = []
     index = 0
     for segment in segments:
@@ -598,24 +332,7 @@ def write_srt(segments: list[dict], names: dict[int, str], include_pending: bool
         lines.append(
             f"{format_timestamp(segment['start'])} --> {format_timestamp(segment['end'])}"
         )
-        lines.append(_prefix_body(segment, name, text_field))
-        lines.append("")
-    return "\n".join(lines)
-
-
-def write_vtt(segments: list[dict], names: dict[int, str], include_pending: bool = True,
-              text_field: str = "both") -> str:
-    lines = ["WEBVTT", ""]
-    for segment in segments:
-        name = names.get(segment.get("speaker_id"))
-        if name is None and not include_pending:
-            continue
-        lines.append(
-            f"{format_timestamp(segment['start'], '.')} --> "
-            f"{format_timestamp(segment['end'], '.')}"
-        )
-        body = compose_text(segment, text_field)
-        lines.append(f"<v {name}>{body}" if name else body)
+        lines.append(_speaker_prefix(name) + segment.get("text", ""))
         lines.append("")
     return "\n".join(lines)
 
@@ -625,13 +342,8 @@ def write_ass(
     names: dict[int, str],
     colors: dict[int, str],
     include_pending: bool = True,
-    text_field: str = "both",
 ) -> str:
-    """ASS with one style per speaker so players show the speaker colour.
-
-    A bilingual translation line is rendered with the smaller ``Translation``
-    style via an inline ``{\\rTranslation}`` reset.
-    """
+    """ASS with one style per speaker so players show the speaker colour."""
     header = [
         "[Script Info]",
         "; Generated by Grain",
@@ -647,12 +359,9 @@ def write_ass(
         "MarginR, MarginV, Encoding",
     ]
 
-    def style_line(name: str, color: str, scale: float = 1.0) -> str:
+    def style_line(name: str, color: str) -> str:
         style = dict(_ASS_DEFAULT_STYLE)
         style["PrimaryColour"] = ass_color(color)
-        if scale != 1.0:
-            base = float(_ASS_DEFAULT_STYLE["Fontsize"])
-            style["Fontsize"] = str(int(base * scale))
         order = [
             "Fontname", "Fontsize", "PrimaryColour", "SecondaryColour",
             "OutlineColour", "BackColour", "Bold", "Italic", "Underline",
@@ -664,10 +373,10 @@ def write_ass(
         return f"Style: {name},{values}"
 
     header.append(style_line("Default", "#CCCCCC"))
-    header.append(style_line("Translation", "#D8D8DE", 0.82))
     for speaker_id in sorted(names):
         safe = names[speaker_id].replace(",", " ").strip()
-        header.append(style_line(f"S{speaker_id}_{safe}"[:48], colors.get(speaker_id, "#FFFFFF")))
+        header.append(style_line(f"S{speaker_id}_{safe}"[:48],
+                                 colors.get(speaker_id, "#FFFFFF")))
 
     lines = header + [
         "",
@@ -679,17 +388,10 @@ def write_ass(
         name = names.get(speaker_id)
         if name is None and not include_pending:
             continue
-        style_name = f"S{speaker_id}_{name.replace(',', ' ').strip()}"[:48] if name else "Default"
+        style_name = (f"S{speaker_id}_{name.replace(',', ' ').strip()}"[:48]
+                      if name else "Default")
         actor = name or ""
-        primary = segment.get("text", "")
-        translation = (segment.get("translation") or "").strip()
-        if text_field == "translation":
-            primary, translation = translation, ""
-        elif text_field == "primary":
-            translation = ""
-        text = primary.replace("\n", "\\N")
-        if translation:
-            text += "\\N{\\rTranslation}" + translation.replace("\n", "\\N")
+        text = segment.get("text", "").replace("\n", "\\N")
         lines.append(
             f"Dialogue: 0,{ass_timestamp(segment['start'])},"
             f"{ass_timestamp(segment['end'])},{style_name},{actor},"
